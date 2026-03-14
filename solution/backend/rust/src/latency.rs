@@ -96,10 +96,14 @@ pub fn compute_time_per_step(
 /// - k_strip: tensors loaded fresh at each k-step
 /// - out_evict_size: size of output slice evicted on the last k-step
 pub struct StepMemoryPlan {
-    /// (tensor_id, elements) for tensors loaded fully once per spatial tile, on first k-step
+    /// (tensor_id, elements) for tensors loaded fully once per spatial tile, on first k-step.
+    /// These benefit from row-reuse in spatial tiling (e.g., MatMul LHS row strips).
     pub full_load: Vec<(usize, i64)>,
     /// (tensor_id, elements) for tensors loaded at each k-step
     pub k_strip: Vec<(usize, i64)>,
+    /// (tensor_id, elements) for Pointwise inputs: loaded once per spatial tile (last k-step),
+    /// no row-reuse benefit (each tile needs its own slice).
+    pub pw_load: Vec<(usize, i64)>,
     /// elements evicted to slow memory on the last k-step of each spatial tile
     pub out_evict_size: i64,
     /// retained tensors from prior subgraphs (pre-loaded, cost=0 except size is counted in WS)
@@ -134,6 +138,7 @@ fn build_memory_plan(
 
     let mut full_load: Vec<(usize, i64)> = Vec::new();
     let mut k_strip: Vec<(usize, i64)> = Vec::new();
+    let mut pw_load: Vec<(usize, i64)> = Vec::new();
     let mut pre_retained: Vec<usize> = Vec::new();
     let mut seen: HashSet<usize> = HashSet::new();
 
@@ -141,7 +146,8 @@ fn build_memory_plan(
         let op = &problem.ops[op_idx];
 
         if !op.is_matmul() {
-            // Pointwise: all boundary inputs are loaded per-tile (= per k-step, since k-steps=1)
+            // Pointwise: inputs loaded once per spatial tile (PW executes on last k-step only).
+            // Place in full_load so they are loaded on first k-step and held resident.
             for &in_t in &op.inputs {
                 let produced_inside = dag.tensor_producer[in_t]
                     .map(|p| op_set.contains(&p))
@@ -153,8 +159,8 @@ fn build_memory_plan(
                 if previously_retained.contains(&in_t) {
                     pre_retained.push(in_t);
                 } else {
-                    // Pointwise input slice = w * h
-                    k_strip.push((in_t, w * h));
+                    // Pointwise input slice = w * h, loaded once per spatial tile (no row-reuse)
+                    pw_load.push((in_t, w * h));
                 }
             }
             continue;
@@ -222,6 +228,7 @@ fn build_memory_plan(
     StepMemoryPlan {
         full_load,
         k_strip,
+        pw_load,
         out_evict_size,
         pre_retained,
     }
@@ -288,6 +295,7 @@ pub fn subgraph_latency(
 
     let full_load_total: i64 = plan.full_load.iter().map(|(_, sz)| sz).sum();
     let k_strip_total: i64 = plan.k_strip.iter().map(|(_, sz)| sz).sum();
+    let pw_load_total: i64 = plan.pw_load.iter().map(|(_, sz)| sz).sum();
 
     // Identify which k-strip inputs are MatMul LHS (reused across columns in spatial tiling)
     // vs RHS (always reloaded). This matters for spatial tiling (num_k_steps = 1).
@@ -357,8 +365,9 @@ pub fn subgraph_latency(
             if num_k_steps > 1 {
                 // Split-K mode: full_load_inputs are loaded on first k-step of each spatial tile,
                 // then reused across k-steps. k_strip_inputs loaded every k-step.
+                // pw_load inputs loaded once per spatial tile (first k-step).
                 if is_first_k {
-                    load += full_load_total;
+                    load += full_load_total + pw_load_total;
                 }
                 load += k_strip_total;
             } else {
@@ -366,11 +375,14 @@ pub fn subgraph_latency(
                 // full_load tensors (upstream LHS row strips) reused across columns in same row.
                 // lhs_strip_total (final MatMul LHS) also reused across columns.
                 // Both treated as "row-reusable" in raster order.
+                // pw_load inputs loaded every spatial tile (no row-reuse).
                 if is_first_col {
                     load += full_load_total + lhs_strip_total;
                 }
                 // rhs strips always loaded each column.
                 load += rhs_strip_total;
+                // Pointwise inputs loaded every tile (no reuse across columns)
+                load += pw_load_total;
             }
 
             // Evict output on last k-step of each spatial tile

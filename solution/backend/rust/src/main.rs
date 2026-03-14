@@ -521,6 +521,66 @@ mod tests {
         );
     }
 
+    // Fused MatMul+Pointwise with split-K: Pointwise runs once per spatial tile (last k-step only)
+    #[test]
+    fn test_fused_matmul_pointwise_splitk() {
+        // MatMul(Op0): Tensor0(128x128) @ Tensor1(128x128) -> Tensor2(128x128), cost=2000
+        // Pointwise(Op1): Tensor2 -> Tensor3(128x128), cost=500
+        // Fused subgraph [0,1] with k=32 (K_full=128, so 4 k-steps)
+        let json = r#"{
+            "widths": [128,128,128,128],
+            "heights": [128,128,128,128],
+            "inputs": [[0,1],[2]],
+            "outputs": [[2],[3]],
+            "base_costs": [2000, 500],
+            "op_types": ["MatMul","Pointwise"],
+            "fast_memory_capacity": 50000,
+            "slow_memory_bandwidth": 10,
+            "native_granularity": [128, 128]
+        }"#;
+        let problem = parse_problem(json).unwrap();
+        let dag = DagInfo::build(&problem).unwrap();
+
+        let gran = Granularity { w: 128, h: 128, k: 32 };
+        let lat = subgraph_latency(&[0, 1], &gran, &[], &HashSet::new(), &problem, &dag);
+
+        // 4 k-steps (128/32), 1 spatial tile
+        // Steps 1-3 (non-last): compute = MatMul only = 2000*(32/128) = 500
+        // Step 4 (last): compute = 500 + Pointwise 500 = 1000
+        // Memory: step 1 loads Tensor0 (128*128=16384) + Tensor1 strip (128*32=4096) = 20480/10 = 2048
+        //   Pointwise input (Tensor2) is ephemeral within subgraph — no load cost
+        // Step 2-3: Tensor1 strip reload (4096/10 = 409.6), Tensor0 reused
+        // Step 4: Tensor1 strip (409.6) + evict Tensor3 (128*128/10 = 1638.4) = 2048
+        //
+        // Step 1: max(500, 2048) = 2048
+        // Step 2: max(500, 409.6) = 500
+        // Step 3: max(500, 409.6) = 500
+        // Step 4: max(1000, 2048) = 2048
+        // Total = 2048 + 500 + 500 + 2048 = 5096
+
+        // Verify Pointwise cost appears only once (not 4 times)
+        // If PW ran every step: total compute would be 500+500=1000 per step * 4 = different
+        assert!(
+            lat > 4000.0 && lat < 6000.0,
+            "Fused MatMul+PW split-K latency should be ~5096, got {:.1}",
+            lat
+        );
+
+        // Also verify: with k=128 (no split-K, 1 step), latency should be different
+        let gran_full = Granularity { w: 128, h: 128, k: 128 };
+        let lat_full = subgraph_latency(&[0, 1], &gran_full, &[], &HashSet::new(), &problem, &dag);
+
+        // 1 k-step: compute = 2000 + 500 = 2500 (both ops run)
+        // Memory: Tensor0 (16384/10=1638.4) + Tensor1 (128*128/10=1638.4) + evict Tensor3 (1638.4)
+        // Total mem = 4915.2
+        // max(2500, 4915.2) = 4915.2
+        assert!(
+            (lat_full - 4915.2).abs() < 1.0,
+            "Full-k fused MatMul+PW latency should be 4915.2, got {:.1}",
+            lat_full
+        );
+    }
+
     // Benchmark validation: all 5 benchmark solutions should cover all ops and have non-negative latencies
     #[test]
     fn test_benchmark_solutions_validity() {
