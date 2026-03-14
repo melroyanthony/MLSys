@@ -40,31 +40,23 @@ pub fn find_boundary_matmul_k_full(
 
 /// Compute cost for one step of a subgraph.
 ///
-/// For a subgraph with a boundary MatMul:
-///   - All MatMul ops use: base_cost * (k / K_full_boundary)
-///   - Pointwise ops use: base_cost
-///
-/// For a subgraph with no boundary MatMul (Pointwise final):
-///   - All MatMul ops use: base_cost (fully computed per step, no k split)
-///   - Pointwise ops use: base_cost
+/// Each MatMul op is scaled by its own K_full:
+///   base_cost * (k / K_full_for_this_op)
+/// Pointwise ops always pay full base_cost per step.
 pub fn compute_time_per_step(
     subgraph_ops: &[usize],
     granularity: &Granularity,
     problem: &Problem,
-    dag: &DagInfo,
+    _dag: &DagInfo,
 ) -> f64 {
-    let boundary_k_full = find_boundary_matmul_k_full(subgraph_ops, problem, dag);
     let k = granularity.k as f64;
 
     let mut total: f64 = 0.0;
     for &op_idx in subgraph_ops {
         let op = &problem.ops[op_idx];
         if op.is_matmul() {
-            let cost = match boundary_k_full {
-                Some(kf) => op.base_cost as f64 * (k / kf as f64),
-                None => op.base_cost as f64, // no split-K: full cost
-            };
-            total += cost;
+            let op_k_full = k_full_for_matmul(op, &problem.tensors) as f64;
+            total += op.base_cost as f64 * (k / op_k_full);
         } else {
             total += op.base_cost as f64;
         }

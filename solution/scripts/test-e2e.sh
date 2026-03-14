@@ -11,6 +11,9 @@ AGENT_DIR="$PROJECT_ROOT/solution/agent"
 BENCH_DIR="$PROJECT_ROOT/problem/benchmarks"
 TMP_DIR="/tmp/mlsys-e2e-$$"
 
+cleanup() { rm -rf "$TMP_DIR"; }
+trap cleanup EXIT INT TERM
+
 mkdir -p "$TMP_DIR"
 
 PASS=0

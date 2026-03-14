@@ -2,7 +2,9 @@
 
 use serde::Deserialize;
 
-use crate::models::{Granularity, Op, Problem, Tensor};
+use serde_json::Value;
+
+use crate::models::{Granularity, Op, Problem, Solution, SubgraphDef, Tensor};
 
 #[derive(Deserialize)]
 struct ProblemJson {
@@ -62,6 +64,65 @@ pub fn parse_problem(json_str: &str) -> Result<Problem, String> {
         slow_memory_bandwidth: raw.slow_memory_bandwidth,
         native_granularity: (raw.native_granularity[0], raw.native_granularity[1]),
     })
+}
+
+pub fn parse_solution(json_str: &str) -> Result<Solution, String> {
+    let raw: Value =
+        serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}"))?;
+
+    let subgraphs_arr = raw["subgraphs"].as_array()
+        .ok_or("missing 'subgraphs' array")?;
+    let grans_arr = raw["granularities"].as_array()
+        .ok_or("missing 'granularities' array")?;
+    let retain_arr = raw["tensors_to_retain"].as_array()
+        .ok_or("missing 'tensors_to_retain' array")?;
+    let latencies_arr = raw["subgraph_latencies"].as_array()
+        .ok_or("missing 'subgraph_latencies' array")?;
+    let traversal_arr = raw.get("traversal_orders")
+        .and_then(|v| v.as_array());
+
+    let n = subgraphs_arr.len();
+    let mut subgraphs = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let ops: Vec<usize> = subgraphs_arr[i].as_array()
+            .ok_or(format!("subgraphs[{i}] not an array"))?
+            .iter()
+            .map(|v| v.as_u64().unwrap_or(0) as usize)
+            .collect();
+
+        let g = grans_arr.get(i).and_then(|v| v.as_array())
+            .ok_or(format!("granularities[{i}] not an array"))?;
+        let granularity = Granularity {
+            w: g[0].as_i64().unwrap_or(128),
+            h: g[1].as_i64().unwrap_or(128),
+            k: g[2].as_i64().unwrap_or(1),
+        };
+
+        let tensors_to_retain: Vec<usize> = retain_arr.get(i)
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().map(|v| v.as_u64().unwrap_or(0) as usize).collect())
+            .unwrap_or_default();
+
+        let traversal_order: Option<Vec<i64>> = traversal_arr
+            .and_then(|arr| arr.get(i))
+            .and_then(|v| if v.is_null() { None } else { v.as_array() })
+            .map(|arr| arr.iter().map(|v| v.as_i64().unwrap_or(0)).collect());
+
+        let subgraph_latency = latencies_arr.get(i)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        subgraphs.push(SubgraphDef {
+            ops,
+            granularity,
+            tensors_to_retain,
+            traversal_order,
+            subgraph_latency,
+        });
+    }
+
+    Ok(Solution { subgraphs })
 }
 
 /// Determine K_full for a MatMul op: LHS.width = RHS.height.

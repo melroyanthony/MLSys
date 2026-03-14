@@ -82,6 +82,10 @@ def parse_problem(data: dict) -> Problem:
     """Parse a problem JSON dict into a Problem struct."""
     widths = data["widths"]
     heights = data["heights"]
+    if len(widths) != len(heights):
+        raise ValueError(
+            f"widths ({len(widths)}) and heights ({len(heights)}) arrays must have the same length"
+        )
     tensors = [Tensor(w, h) for w, h in zip(widths, heights)]
 
     ops = []
@@ -418,11 +422,21 @@ def compute_subgraph_latency(
     num_tiles_h = math.ceil(H_out / h)
     num_spatial_tiles = num_tiles_w * num_tiles_h
 
-    # K-steps
+    # K-steps: derive from the boundary-output MatMul (the one whose reduction
+    # dimension determines the tiling loop). Fall back to first MatMul if none
+    # is a boundary output, or 1 for pure-Pointwise subgraphs.
     matmul_ops = [op_idx for op_idx in subgraph_ops
                   if problem.ops[op_idx].op_type == "MatMul"]
     if matmul_ops:
-        k_full = _k_full_for_op(problem.ops[matmul_ops[0]], problem)
+        # Prefer boundary-output MatMul
+        boundary_matmul = None
+        for op_idx in matmul_ops:
+            out_t = problem.ops[op_idx].outputs[0]
+            if out_t in boundary_outputs:
+                boundary_matmul = op_idx
+                break
+        ref_op = boundary_matmul if boundary_matmul is not None else matmul_ops[0]
+        k_full = _k_full_for_op(problem.ops[ref_op], problem)
         num_k_steps = math.ceil(k_full / k)
     else:
         k_full = 1

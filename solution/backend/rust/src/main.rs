@@ -12,21 +12,31 @@ use std::env;
 use std::fs;
 
 use dag::DagInfo;
+use evaluate::evaluate;
 use optimizer::pipeline::run_pipeline;
-use parser::parse_problem;
+use parser::{parse_problem, parse_solution};
 use serializer::serialize_solution;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    match args.get(1).map(|s| s.as_str()) {
+        Some("evaluate") => run_evaluate(&args),
+        _ => run_solve(&args),
+    }
+}
+
+/// Solve mode: ./mlsys <input.json> <output.json>
+fn run_solve(args: &[String]) {
     if args.len() != 3 {
         eprintln!("Usage: {} <input.json> <output.json>", args[0]);
+        eprintln!("       {} evaluate --problem <input.json> --solution <solution.json>", args[0]);
         std::process::exit(1);
     }
 
     let input_path = &args[1];
     let output_path = &args[2];
 
-    // Read and parse input
     let input_str = fs::read_to_string(input_path).unwrap_or_else(|e| {
         eprintln!("Error reading input file '{}': {}", input_path, e);
         std::process::exit(1);
@@ -37,16 +47,13 @@ fn main() {
         std::process::exit(1);
     });
 
-    // Build DAG
     let dag = DagInfo::build(&problem).unwrap_or_else(|e| {
         eprintln!("Error building DAG: {}", e);
         std::process::exit(1);
     });
 
-    // Run optimization pipeline
     let solution = run_pipeline(&problem, &dag);
 
-    // Calculate and report total latency
     let total: f64 = solution.subgraphs.iter().map(|sg| sg.subgraph_latency).sum();
     eprintln!(
         "Solution: {} subgraphs, total latency = {:.2}",
@@ -54,7 +61,6 @@ fn main() {
         total
     );
 
-    // Serialize and write output
     let output_str = serialize_solution(&solution).unwrap_or_else(|e| {
         eprintln!("Error serializing solution: {}", e);
         std::process::exit(1);
@@ -66,6 +72,71 @@ fn main() {
     });
 
     eprintln!("Solution written to {}", output_path);
+}
+
+/// Evaluate mode: ./mlsys evaluate --problem <input.json> --solution <solution.json>
+fn run_evaluate(args: &[String]) {
+    let mut problem_path: Option<&str> = None;
+    let mut solution_path: Option<&str> = None;
+
+    let mut i = 2; // skip binary name and "evaluate"
+    while i < args.len() {
+        match args[i].as_str() {
+            "--problem" if i + 1 < args.len() => {
+                problem_path = Some(&args[i + 1]);
+                i += 2;
+            }
+            "--solution" if i + 1 < args.len() => {
+                solution_path = Some(&args[i + 1]);
+                i += 2;
+            }
+            _ => {
+                eprintln!("Unknown argument: {}", args[i]);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let problem_path = problem_path.unwrap_or_else(|| {
+        eprintln!("Usage: {} evaluate --problem <input.json> --solution <solution.json>", args[0]);
+        std::process::exit(1);
+    });
+    let solution_path = solution_path.unwrap_or_else(|| {
+        eprintln!("Usage: {} evaluate --problem <input.json> --solution <solution.json>", args[0]);
+        std::process::exit(1);
+    });
+
+    let problem_str = fs::read_to_string(problem_path).unwrap_or_else(|e| {
+        eprintln!("Error reading problem file '{}': {}", problem_path, e);
+        std::process::exit(1);
+    });
+    let solution_str = fs::read_to_string(solution_path).unwrap_or_else(|e| {
+        eprintln!("Error reading solution file '{}': {}", solution_path, e);
+        std::process::exit(1);
+    });
+
+    let problem = parse_problem(&problem_str).unwrap_or_else(|e| {
+        eprintln!("Error parsing problem: {}", e);
+        std::process::exit(1);
+    });
+    let solution = parse_solution(&solution_str).unwrap_or_else(|e| {
+        eprintln!("Error parsing solution: {}", e);
+        std::process::exit(1);
+    });
+
+    match evaluate(&problem, &solution) {
+        Ok(result) => {
+            println!("PASS");
+            println!("Total latency: {:.2}", result.total_latency);
+            for (i, lat) in result.subgraph_latencies.iter().enumerate() {
+                println!("  Subgraph {}: {:.2}", i, lat);
+            }
+        }
+        Err(e) => {
+            println!("FAIL: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 #[cfg(test)]
