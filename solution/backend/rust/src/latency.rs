@@ -78,18 +78,29 @@ pub fn compute_time_per_step(
 /// - full_load: tensors loaded ONCE at the start of each spatial tile (reused across k-steps)
 /// - k_strip: tensors loaded fresh at each k-step
 /// - out_evict_size: size of output slice evicted on the last k-step
-struct StepMemoryPlan {
+pub struct StepMemoryPlan {
     /// (tensor_id, elements) for tensors loaded fully once per spatial tile, on first k-step
-    full_load: Vec<(usize, i64)>,
+    pub full_load: Vec<(usize, i64)>,
     /// (tensor_id, elements) for tensors loaded at each k-step
-    k_strip: Vec<(usize, i64)>,
+    pub k_strip: Vec<(usize, i64)>,
     /// elements evicted to slow memory on the last k-step of each spatial tile
-    out_evict_size: i64,
+    pub out_evict_size: i64,
     /// retained tensors from prior subgraphs (pre-loaded, cost=0 except size is counted in WS)
-    pre_retained: Vec<usize>,
+    pub pre_retained: Vec<usize>,
 }
 
 /// Build the per-step memory plan for a subgraph.
+pub fn build_memory_plan_pub(
+    subgraph_ops: &[usize],
+    granularity: &Granularity,
+    tensors_to_retain: &[usize],
+    previously_retained: &HashSet<usize>,
+    problem: &Problem,
+    dag: &DagInfo,
+) -> StepMemoryPlan {
+    build_memory_plan(subgraph_ops, granularity, tensors_to_retain, previously_retained, problem, dag)
+}
+
 fn build_memory_plan(
     subgraph_ops: &[usize],
     granularity: &Granularity,

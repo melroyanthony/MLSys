@@ -19,6 +19,7 @@ use crate::optimizer::fusion::greedy_fusion;
 use crate::optimizer::granularity::optimize_granularities;
 use crate::optimizer::retention::optimize_retention;
 use crate::optimizer::splitk::{apply_splitk, build_retained_sets};
+use crate::optimizer::traversal::optimize_traversals;
 
 pub fn run_pipeline(problem: &Problem, dag: &DagInfo) -> Solution {
     // Stage 1: Baseline
@@ -54,6 +55,9 @@ pub fn run_pipeline(problem: &Problem, dag: &DagInfo) -> Solution {
 
     // Stage 8: Final latency recalculation
     recalculate_latencies(&mut subgraphs, problem, dag);
+
+    // Stage 9: Traversal optimization (snake/zig-zag order for spatial-tiled MatMul subgraphs)
+    optimize_traversals(&mut subgraphs, problem, dag);
 
     Solution { subgraphs }
 }

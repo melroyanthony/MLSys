@@ -20,17 +20,25 @@ use crate::parser::k_full_for_matmul;
 pub fn working_set_size(
     subgraph_ops: &[usize],
     granularity: &Granularity,
-    _tensors_to_retain: &[usize],
+    tensors_to_retain: &[usize],
     previously_retained: &HashSet<usize>,
     problem: &Problem,
     dag: &DagInfo,
 ) -> i64 {
+    // tensors_to_retain lists which outputs of THIS subgraph to keep resident after it completes.
+    // Those tensors are produced one w*h slice at a time during execution, so they do not add
+    // extra capacity beyond the output-slice accounting below.  The tensors that DO occupy full
+    // capacity are those retained FROM A PREVIOUS subgraph, captured in `previously_retained`.
+    // We keep the parameter in the signature so callers stay uniform; the value is not needed here.
+    let _ = tensors_to_retain;
+
     let op_set: HashSet<usize> = subgraph_ops.iter().copied().collect();
     let w = granularity.w;
     let h = granularity.h;
     let k = granularity.k;
 
-    // Previously retained tensors occupy their full size in fast memory.
+    // Previously retained tensors occupy their full size (width * height) in fast memory
+    // because they are fully materialized and pinned from the previous subgraph.
     let retained_size: i64 = previously_retained
         .iter()
         .map(|&t| problem.tensors[t].size())
