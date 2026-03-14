@@ -101,8 +101,9 @@ pub struct StepMemoryPlan {
     pub full_load: Vec<(usize, i64)>,
     /// (tensor_id, elements) for tensors loaded at each k-step
     pub k_strip: Vec<(usize, i64)>,
-    /// (tensor_id, elements) for Pointwise inputs: loaded once per spatial tile (last k-step),
-    /// no row-reuse benefit (each tile needs its own slice).
+    /// (tensor_id, elements) for Pointwise inputs: loaded once per spatial tile (first k-step
+    /// in split-K mode, every tile in spatial-only mode), no row-reuse benefit (each tile
+    /// needs its own slice).
     pub pw_load: Vec<(usize, i64)>,
     /// elements evicted to slow memory on the last k-step of each spatial tile
     pub out_evict_size: i64,
@@ -147,7 +148,7 @@ fn build_memory_plan(
 
         if !op.is_matmul() {
             // Pointwise: inputs loaded once per spatial tile (PW executes on last k-step only).
-            // Place in full_load so they are loaded on first k-step and held resident.
+            // Place in pw_load so they are charged on the first k-step of each spatial tile.
             for &in_t in &op.inputs {
                 let produced_inside = dag.tensor_producer[in_t]
                     .map(|p| op_set.contains(&p))

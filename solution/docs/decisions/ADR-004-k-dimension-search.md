@@ -23,7 +23,7 @@ candidates = w_values x h_values x k_values
 Where:
 - `w_values`: powers of 2 up to output width (as before)
 - `h_values`: powers of 2 up to output height (as before)
-- `k_values`: K_max, K_max/2, K_max/4, ..., 1 where K_max = min(K_full for each MatMul in the subgraph)
+- `k_values`: K_cap, K_cap/2, K_cap/4, ..., 1 where K_cap = min(K_full for each MatMul in the subgraph)
 
 For each (w, h, k) candidate:
 1. Check the working set fits in fast memory (OOM constraint)

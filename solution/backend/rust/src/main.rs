@@ -561,8 +561,8 @@ mod tests {
         // Verify Pointwise cost appears only once (not 4 times)
         // If PW ran every step: total compute would be 500+500=1000 per step * 4 = different
         assert!(
-            lat > 4000.0 && lat < 6000.0,
-            "Fused MatMul+PW split-K latency should be ~5096, got {:.1}",
+            (lat - 5096.0).abs() < 1.0,
+            "Fused MatMul+PW split-K latency should be 5096, got {:.1}",
             lat
         );
 
@@ -578,6 +578,55 @@ mod tests {
             (lat_full - 4915.2).abs() < 1.0,
             "Full-k fused MatMul+PW latency should be 4915.2, got {:.1}",
             lat_full
+        );
+    }
+
+    // Fused MatMul+Pointwise with split-K where Pointwise consumes a boundary bias tensor.
+    // This exercises the pw_load path: the bias tensor is a graph input (boundary), not ephemeral.
+    #[test]
+    fn test_fused_matmul_pointwise_splitk_boundary_pw_input() {
+        // MatMul(Op0): Tensor0(128x128) @ Tensor1(128x128) -> Tensor2(128x128), cost=2000
+        // Pointwise(Op1): [Tensor2, Tensor3_bias] -> Tensor4(128x128), cost=500
+        //   Tensor3 is a graph input (bias), so it is a boundary input to the subgraph.
+        // Fused subgraph [0,1] with k=32 (K_full=128, so 4 k-steps)
+        let json = r#"{
+            "widths": [128,128,128,128,128],
+            "heights": [128,128,128,128,128],
+            "inputs": [[0,1],[2,3]],
+            "outputs": [[2],[4]],
+            "base_costs": [2000, 500],
+            "op_types": ["MatMul","Pointwise"],
+            "fast_memory_capacity": 50000,
+            "slow_memory_bandwidth": 10,
+            "native_granularity": [128, 128]
+        }"#;
+        let problem = parse_problem(json).unwrap();
+        let dag = DagInfo::build(&problem).unwrap();
+
+        let gran = Granularity { w: 128, h: 128, k: 32 };
+        let lat = subgraph_latency(&[0, 1], &gran, &[], &HashSet::new(), &problem, &dag);
+
+        // 4 k-steps (128/32), 1 spatial tile
+        // pw_load path: Tensor3 (bias, 128*128=16384 elements) is a boundary Pointwise input.
+        // It is loaded once per spatial tile on the first k-step (pw_load).
+        //
+        // Step 1 (first k): load Tensor0 full (16384) + Tensor1 strip (4096) + Tensor3 bias (16384)
+        //   = (16384 + 4096 + 16384) / 10 = 36864/10 = 3686.4
+        //   compute = 2000*(32/128) = 500
+        //   step latency = max(500, 3686.4) = 3686.4
+        // Step 2: load Tensor1 strip (4096/10=409.6), compute=500
+        //   step latency = max(500, 409.6) = 500
+        // Step 3: same as step 2 => 500
+        // Step 4 (last k): load Tensor1 strip (409.6) + evict Tensor4 (16384/10=1638.4)
+        //   mem = (4096 + 16384)/10 = 2048
+        //   compute = 500 + 500 (Pointwise last k) = 1000
+        //   step latency = max(1000, 2048) = 2048
+        // Total = 3686.4 + 500 + 500 + 2048 = 6734.4
+
+        assert!(
+            (lat - 6734.4).abs() < 1.0,
+            "Fused MatMul+PW split-K with boundary bias: expected 6734.4, got {:.1}",
+            lat
         );
     }
 

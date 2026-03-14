@@ -172,10 +172,10 @@ The granularity search explores a three-dimensional candidate space for each sub
 ```
 w candidates: powers of 2 from 1 up to output_width
 h candidates: powers of 2 from 1 up to output_height
-k candidates: K_max, K_max/2, K_max/4, ..., 1  (powers of 2, descending)
+k candidates: K_cap, K_cap/2, K_cap/4, ..., 1  (powers of 2, descending)
 ```
 
-Where `K_max = min(K_full for each MatMul op in the subgraph)`. Using the minimum ensures k is a valid divisor for all MatMul reduction dimensions in a fused subgraph. For Pointwise-only subgraphs, k is fixed at 1 and only (w, h) is searched.
+Where `K_cap = min(K_full for each MatMul op in the subgraph)`. Using the minimum ensures k never exceeds any MatMul's reduction dimension; `ceil(K_full/k)` handles any remainder. For Pointwise-only subgraphs, k is fixed at 1 and only (w, h) is searched.
 
 **For each (w, h, k) candidate:**
 1. Compute the working set (input slices + output slices + retained tensors)

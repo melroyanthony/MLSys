@@ -315,11 +315,12 @@ def compute_working_set(
     boundary_inputs = consumed_inside - produced_inside
     boundary_outputs = produced_inside - consumed_inside
 
-    # Determine whether this is a split-K scenario
+    # Determine whether this is a split-K scenario.
+    # Use min(K_full) across all MatMuls, consistent with compute_subgraph_latency().
     matmul_ops = [op_idx for op_idx in subgraph_ops
                   if problem.ops[op_idx].op_type == "MatMul"]
     if matmul_ops:
-        k_full = _k_full_for_op(problem.ops[matmul_ops[0]], problem)
+        k_full = min(_k_full_for_op(problem.ops[op_idx], problem) for op_idx in matmul_ops)
         num_k_steps = math.ceil(k_full / k)
     else:
         k_full = 1
@@ -468,7 +469,6 @@ def compute_subgraph_latency(
     for spatial_step, tile_flat_idx in enumerate(tile_sequence):
         tile_row = tile_flat_idx // num_tiles_w
         tile_col = tile_flat_idx % num_tiles_w
-        is_last_spatial = (spatial_step == len(tile_sequence) - 1)
 
         for k_step in range(num_k_steps):
             is_first_k = (k_step == 0)
@@ -521,18 +521,13 @@ def compute_subgraph_latency(
             # ------- Output eviction -------
             # Non-retained outputs are evicted to slow memory.
             # Retained outputs (tensors_to_retain_after) are NOT evicted.
-            # In split-K: eviction only at LAST k-step of LAST spatial tile.
+            # In split-K with spatial tiling: eviction at LAST k-step of EACH spatial tile
+            # (each spatial tile's accumulator is written out once it finishes all k-steps).
             # In non-split-K: eviction at LAST k-step of EACH spatial tile.
             if is_last_k:
-                if is_split_k:
-                    if is_last_spatial:
-                        for t_idx in boundary_outputs:
-                            if t_idx not in tensors_to_retain_after:
-                                mem_out += (w * h) / bw
-                else:
-                    for t_idx in boundary_outputs:
-                        if t_idx not in tensors_to_retain_after:
-                            mem_out += (w * h) / bw
+                for t_idx in boundary_outputs:
+                    if t_idx not in tensors_to_retain_after:
+                        mem_out += (w * h) / bw
 
             # Pointwise ops execute only on the last k-step of each spatial tile.
             compute_this_step = matmul_compute_per_step + (pointwise_compute if is_last_k else 0.0)

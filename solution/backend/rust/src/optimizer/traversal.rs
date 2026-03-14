@@ -115,6 +115,7 @@ pub fn latency_with_traversal(
         .collect();
 
     let full_load_total: i64 = plan.full_load.iter().map(|(_, sz)| sz).sum();
+    let pw_load_total: i64 = plan.pw_load.iter().map(|(_, sz)| sz).sum();
     let mut lhs_strip_total: i64 = 0;
     let mut rhs_strip_total: i64 = 0;
     for (t, sz) in &plan.k_strip {
@@ -155,6 +156,9 @@ pub fn latency_with_traversal(
         if !same_col {
             load += rhs_strip_total;
         }
+
+        // Pointwise inputs: no row/col reuse — charged on every spatial tile.
+        load += pw_load_total;
 
         // Evict output slice.
         let evict = out_evict_size;
