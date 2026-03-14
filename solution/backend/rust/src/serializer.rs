@@ -27,7 +27,8 @@ pub fn serialize_solution(solution: &Solution) -> Result<String, String> {
         tensors_to_retain.push(sg.tensors_to_retain.clone());
         let to_val = match &sg.traversal_order {
             None => Value::Null,
-            Some(order) => serde_json::to_value(order).unwrap(),
+            Some(order) => serde_json::to_value(order)
+                .map_err(|e| format!("Failed to serialize traversal order: {e}"))?,
         };
         traversal_orders.push(to_val);
         subgraph_latencies.push(sg.subgraph_latency);

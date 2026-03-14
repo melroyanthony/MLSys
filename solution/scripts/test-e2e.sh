@@ -5,7 +5,7 @@
 
 set -uo pipefail
 
-PROJECT_ROOT="/Users/melroyanthony/Desktop/area-51/projects/MLSys"
+PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUST_DIR="$PROJECT_ROOT/solution/backend/rust"
 AGENT_DIR="$PROJECT_ROOT/solution/agent"
 BENCH_DIR="$PROJECT_ROOT/problem/benchmarks"

@@ -34,9 +34,19 @@ impl DagInfo {
 
         for (op_idx, op) in problem.ops.iter().enumerate() {
             for &out_t in &op.outputs {
+                if out_t >= num_tensors {
+                    return Err(format!(
+                        "Op {op_idx} references output tensor {out_t} but only {num_tensors} tensors exist"
+                    ));
+                }
                 tensor_producer[out_t] = Some(op_idx);
             }
             for &in_t in &op.inputs {
+                if in_t >= num_tensors {
+                    return Err(format!(
+                        "Op {op_idx} references input tensor {in_t} but only {num_tensors} tensors exist"
+                    ));
+                }
                 tensor_consumers[in_t].push(op_idx);
             }
         }

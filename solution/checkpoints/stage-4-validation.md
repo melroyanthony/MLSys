@@ -97,8 +97,8 @@
 ### Tech Stack
 | Component | Technology | Status |
 |-----------|------------|--------|
-| Track A Scheduler | Rust (Cargo, edition 2024) | Compiled and passing |
-| Track B Agent | Python 3.14 + google-genai | Imports OK, baseline mode works |
+| Track A Scheduler | Rust (Cargo, edition 2021) | Compiled and passing |
+| Track B Agent | Python 3.12 + google-genai | Imports OK, baseline mode works |
 | Track B Evaluator | Pure Python (no external deps) | 29 tests passing |
 | Test Runner (Rust) | `cargo test` | 15/15 passing |
 | Test Runner (Python) | pytest 9.0.2 via uv venv | 29/29 passing |

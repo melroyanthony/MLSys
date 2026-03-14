@@ -41,7 +41,22 @@ pub fn greedy_fusion(
 
                 let retained_before: HashSet<usize> = HashSet::new();
 
-                if find_feasible_granularity(&merged, &retained_before, problem, dag).is_some() {
+                // Structural validity: merged ops must have consistent boundary
+                // output dimensions for the shared granularity to be meaningful.
+                let boundary_outputs = dag.boundary_outputs(problem, &merged);
+                let dims_consistent = if boundary_outputs.is_empty() {
+                    true
+                } else {
+                    let first = boundary_outputs[0];
+                    let (w0, h0) = (problem.tensors[first].width, problem.tensors[first].height);
+                    boundary_outputs.iter().all(|&t| {
+                        problem.tensors[t].width == w0 && problem.tensors[t].height == h0
+                    })
+                };
+
+                if dims_consistent
+                    && find_feasible_granularity(&merged, &retained_before, problem, dag).is_some()
+                {
                     new_groups.push(merged);
                     i += 2;
                     changed = true;

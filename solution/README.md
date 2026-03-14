@@ -56,7 +56,7 @@ using Gemini 2.5 Flash when a `GOOGLE_API_KEY` is available.
 ### Prerequisites
 
 - Rust toolchain 1.80+ (`rustup`)
-- Python 3.11+ and `uv` (`pip install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`)
+- Python 3.12+ and `uv` (`brew install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`)
 
 ---
 
