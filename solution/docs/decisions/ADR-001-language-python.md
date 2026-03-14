@@ -1,41 +1,47 @@
-# ADR-001: Python as Implementation Language
+# ADR-001: Rust for Track A, Python for Track B
 
 ## Status
-Accepted
+Accepted (supersedes original Python-only decision)
 
 ## Context
-The MLSys DAG Scheduler is a contest submission that must read a problem JSON, compute an optimized execution schedule, and produce a solution JSON. The reference implementation and evaluator are in C++ (`mlsys.h`), but the contest allows any language for the solver.
+The MLSys 2026 contest has two tracks:
+- **Track A (Systems)**: Deliver a compiled binary `mlsys` that reads problem JSON and writes solution JSON. Source in "C++/Rust/etc." explicitly allowed.
+- **Track B (Agents)**: Deliver a Python `agent.py` using Google Gemini API exclusively.
 
 Key considerations:
-- **Development speed**: Contest is time-constrained (multi-hour to multi-day hackathon)
-- **Complexity**: The scheduler involves graph algorithms, combinatorial search, and floating-point arithmetic -- not low-level systems programming
-- **Data sizes**: At most 96 ops and 160 tensors. The scheduler performs arithmetic on small integers and floats, not heavy numerical computation
-- **Evaluator**: The C++ `Evaluate()` function is the ground truth. We need our Python latency model to match it exactly, but we do not need to call C++ from Python
+- Track A timeout is 2-120 seconds depending on benchmark size — performance matters
+- Track B timeout is 10 minutes per benchmark — Python + API latency is fine
+- The reference evaluator is C++ (`mlsys.h`) — Rust matches C++ performance and memory safety
+- Data sizes: up to 96 ops, 160 tensors — algorithmic efficiency matters more than raw speed, but Rust eliminates any performance concerns
 
 ## Decision
-Implement the scheduler in **Python 3.12+** using:
-- `dataclasses` for typed data structures mirroring `mlsys.h`
-- Standard library only (no NumPy, no external dependencies beyond `pytest` for testing)
-- `uv` for package management per project conventions
+
+### Track A: Rust
+- Pure Rust implementation with `serde_json` for I/O
+- Compile to statically linked binary named `mlsys`
+- Zero-copy JSON parsing where possible
+- Module structure mirrors the algorithm pipeline
+
+### Track B: Python
+- Python 3.12+ script `agent.py`
+- Uses `google-genai` SDK for Gemini API calls
+- Agent reasons about the problem and generates solution JSON
+- Prompts and few-shot examples in `prompts/` directory
 
 ## Consequences
 
 ### Positive
-- **Rapid prototyping**: Python's expressiveness allows faster iteration on algorithm design
-- **Type safety**: Type hints + `dataclasses` provide structure without boilerplate
-- **Debugging**: Easy to print intermediate states, use interactive debugging
-- **Testing**: `pytest` ecosystem is mature, parameterized tests are trivial
-- **No build step**: Run directly, no compilation needed
+- **Rust**: Zero-cost abstractions, fearless concurrency for parallel search, guaranteed memory safety, matches C++ performance
+- **Rust**: Strong type system with enums/pattern matching maps naturally to op types and scheduling decisions
+- **Rust**: Static linking produces a single binary — no runtime dependencies
+- **Python (Track B)**: Natural fit for API calls and prompt engineering
+- **Both**: Each track uses the language best suited to its constraints
 
 ### Negative
-- **Performance ceiling**: Python is ~50-100x slower than C++ for tight loops. If the granularity search space is large, this could matter for benchmark 17 (96 ops)
-- **Floating-point behavior**: Python `float` is IEEE 754 double (same as C++ `double`), but operator ordering differences could cause small divergences from `Evaluate()`
+- **Rust**: Slower iteration speed than Python during development
+- **Two codebases**: Must maintain separate implementations (but they solve different sub-problems)
 
 ### Mitigations
-- Profile early on benchmark 17. If runtime exceeds 5 minutes, limit the search space (powers-of-2 only, skip clearly suboptimal candidates)
-- Validate all 5 PROBLEM.md examples against known latency values to catch any float divergence
-- Pure Python (no NumPy) avoids dependency complexity and keeps the codebase simple
-
-### Neutral
-- Standard choice for algorithm contests and prototyping
-- Team familiarity assumed
+- Rust's compiler catches many bugs at compile time, offsetting slower iteration
+- Track A and Track B have distinct deliverable formats — no shared code needed
+- The algorithm logic is the same; only the implementation language differs
