@@ -10,50 +10,58 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **Track A: Rust scheduler binary** (`solution/backend/rust/`)
-  - `main.rs` — CLI entry point; reads input JSON, runs pipeline, writes
-    output JSON; prints subgraph count and total latency to stderr.
+  - `main.rs` — CLI with two modes:
+    - Solve: `./mlsys <input.json> <output.json>`
+    - Evaluate: `./mlsys evaluate --problem <input.json> --solution <solution.json>`
   - `models.rs` — Core data types: `Problem`, `Op`, `Tensor`, `Solution`,
     `SubgraphDef`, `Granularity`.
-  - `parser.rs` — Deserialises the contest input JSON format into `Problem`.
-  - `dag.rs` — DAG construction: topological sort, cycle detection, boundary
-    tensor computation, predecessor/successor maps.
-  - `latency.rs` — Subgraph latency model: tile-level compute cost, slow-memory
-    transfer time, working-set tracking, roofline calculation.
-  - `memory.rs` — Fast-memory OOM check for a given subgraph and granularity.
-  - `evaluate.rs` — Full solution evaluator; also exposed via CLI evaluate
-    subcommand (`./mlsys evaluate --problem <f> --solution <f>`).
-  - `serializer.rs` — Serialises `Solution` to the contest output JSON format.
+  - `parser.rs` — Deserialises problem and solution JSON with strict validation
+    (op_type, MatMul arity, tensor bounds, granularity length).
+  - `dag.rs` — DAG construction: topological sort (Kahn's), cycle detection,
+    boundary tensor computation, predecessor/successor maps, tensor index bounds
+    checking.
+  - `latency.rs` — Subgraph latency model: per-op K_full scaling for MatMul
+    (`base_cost * k/K_full`), roofline per step (`max(compute, memory)`),
+    intra-subgraph data reuse tracking.
+  - `memory.rs` — Working-set calculator and OOM checker. Uses min K_full across
+    MatMuls for split-K search (safe for mixed-K subgraphs).
+  - `evaluate.rs` — Full solution evaluator: validates OOM, op coverage,
+    traversal order permutation, and reported-vs-computed latency mismatch.
+  - `serializer.rs` — Serialises `Solution` to contest JSON format with
+    proper error propagation (no panics).
   - `baseline.rs` — Initial schedule: one subgraph per op at native granularity.
-  - `optimizer/fusion.rs` — Greedy chain fusion: merges adjacent ops when
-    fusing reduces latency and the working set fits in fast memory.
-  - `optimizer/retention.rs` — Tensor retention: decides whether keeping a
-    boundary tensor resident in fast memory lowers total latency.
-  - `optimizer/splitk.rs` — Split-K: reduces MatMul k-dimension for subgraphs
-    that OOM at native granularity.
-  - `optimizer/granularity.rs` — Granularity grid search: finds the (w, h, k)
-    that minimises subgraph latency subject to memory feasibility.
-  - `optimizer/traversal.rs` — Traversal order optimization: compares raster
-    vs snake (zig-zag) tile order for MatMul subgraphs, picks lower latency.
+  - `optimizer/fusion.rs` — Greedy chain fusion with boundary output dimension
+    consistency check before merging.
+  - `optimizer/retention.rs` — Tensor retention across subgraph boundaries.
+  - `optimizer/splitk.rs` — Split-K for memory-constrained MatMuls.
+  - `optimizer/granularity.rs` — Exhaustive (w, h, k) grid search per subgraph.
+  - `optimizer/traversal.rs` — Snake/zig-zag tile ordering for MatMul data reuse.
   - `optimizer/pipeline.rs` — 9-stage pipeline orchestrator:
-    baseline → fusion → retention → split-K → granularity search →
-    retention (pass 2) → emergency OOM fix → final latency recalculation →
-    traversal optimization.
+    1. Baseline
+    2. Greedy chain fusion
+    3. Retention (pass 1)
+    4. Split-K
+    5. Granularity search
+    6. Retention (pass 2)
+    7. Emergency OOM fix
+    8. Final latency recalculation
+    9. Traversal optimization
 
 - **Track B: Python Gemini agent** (`solution/agent/`)
-  - `evaluator.py` — Pure-Python latency model; mirrors the Rust latency
-    logic exactly (used for local validation of Gemini suggestions).
+  - `evaluator.py` — Pure-Python latency model mirroring Rust logic exactly.
+    Per-op K_full scaling, boundary-output MatMul K_full for num_k_steps,
+    widths/heights length validation.
   - `scheduler.py` — Python optimizer pipeline (baseline, fusion, split-K,
-    granularity search, retention); runs without any API call.
+    granularity search, retention, traversal); runs without any API call.
   - `agent.py` — Agent loop: runs local optimizer first (safe fallback),
     then iteratively calls Gemini 2.5 Flash to propose improvements; validates
-    each suggestion locally before accepting it; writes best solution found
-    within a 9-minute budget.
+    each suggestion locally (including traversal order permutation check)
+    before accepting; writes best solution within a 9-minute budget.
+    Traversal order elements coerced to int from Gemini responses.
   - `prompts/system.md` — System prompt: contest rules, output format,
     latency formula, optimisation objectives.
-  - `prompts/examples.md` — Five worked examples from the problem statement
-    with annotated strategies and expected latencies.
-  - `prompts/strategies.md` — Optimisation strategy guide: fusion heuristics,
-    retention decision rules, split-K guidance, granularity tuning.
+  - `prompts/examples.md` — Five worked examples from the problem statement.
+  - `prompts/strategies.md` — Fusion, retention, split-K, granularity tuning.
   - `requirements.txt` — Single runtime dependency: `google-genai>=1.0.0`.
 
 - **Optimizer stages** (implemented in both tracks)
@@ -61,8 +69,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Chain fusion: eliminates intermediate DRAM round-trips for adjacent ops.
   - Tensor retention: avoids redundant write-then-read across subgraph boundaries.
   - Split-K: enables memory-feasible MatMul execution under tight capacity.
-  - Granularity search: tunes tile size to balance compute and memory at
-    the roofline equilibrium point.
+  - Granularity search: tunes tile size to balance compute and memory.
   - Traversal optimization: snake/zig-zag tile order for MatMul data reuse.
 
 - **Test suite**
@@ -74,25 +81,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     - Example 5 (chained MatMul): split-K granularity
     - Edge cases: single tiny op, OOM detection, serialization round-trip,
       ephemeral tensor boundary correctness, cyclic DAG rejection
-    - All 5 released benchmarks: full pipeline produces valid, fully-covering,
-      non-negative-latency solutions
-  - 13 E2E checks via `solution/scripts/test-e2e.sh`:
-    - Track A build verification
-    - Track A: 5 benchmarks validated (JSON structure, coverage, latencies)
-    - Track B: evaluator and scheduler import verification
-    - Track B: 5 benchmarks validated in baseline mode (no API key required)
+    - All 5 released benchmarks: full pipeline validity check
+  - E2E script (`solution/scripts/test-e2e.sh`):
+    - Track A build + 5 benchmark validation
+    - Track B import verification + 5 benchmark validation (baseline mode)
+    - Trap handler for temp directory cleanup on exit/signal
+    - Uses `uv run python` with `sys.argv` (no shell interpolation)
 
-- **CI/CD** — GitHub Actions workflow (`solution/.github/workflows/ci.yml`):
-  - Rust job: `cargo build --release` + `cargo test` on ubuntu-latest
+- **CI/CD** — GitHub Actions workflow (`.github/workflows/ci.yml`):
+  - Rust job: `cargo build --release` + `cargo test`
   - Python job: `uv` setup, dependency install, evaluator smoke test,
-    benchmark baseline run
-  - E2E job: builds Rust binary, runs all 5 benchmarks through both tracks,
-    validates output JSON
+    benchmark baseline run with `uv run python`
+  - E2E job: both tracks against all 5 benchmarks with JSON validation
+  - Cache key uses `Cargo.toml` hash (Cargo.lock is gitignored)
 
 - **Documentation**
-  - `solution/README.md` — Project overview, quick-start instructions,
-    architecture diagram, full pipeline description, test instructions,
-    benchmark results summary.
+  - `solution/README.md` — Project overview, 9-stage pipeline diagram,
+    per-step roofline latency formula, benchmark results, quick-start for
+    both tracks.
   - `solution/CHANGELOG.md` — This file.
-  - `solution/docs/architecture/` — Architecture decision records.
-  - `solution/docs/decisions/` — Implementation decision notes.
+  - `solution/docs/architecture/` — System design (Rust modules), data model
+    (C++ to Rust mapping), data flow (9-stage composition), deployment
+    topology (Rust binary + Python agent), user journeys, C4 workspace,
+    error catalog (Rust error handling), security model.
+  - `solution/docs/decisions/` — ADR-001 (Rust + Python language selection),
+    ADR-002 (baseline-first development), ADR-003 (greedy fusion over DP).
+
+- **Benchmark results** (Track A — Rust)
+
+  | Benchmark | Ops | Latency |
+  |-----------|-----|---------|
+  | mlsys-2026-1  | 5   | 27,443    |
+  | mlsys-2026-5  | 19  | 27,856    |
+  | mlsys-2026-9  | 32  | 110,100   |
+  | mlsys-2026-13 | 63  | 191,693   |
+  | mlsys-2026-17 | 103 | 23,650    |
