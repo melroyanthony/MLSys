@@ -11,26 +11,19 @@ use crate::memory::{check_oom, find_split_k};
 use crate::models::{Granularity, Problem, SubgraphDef};
 use crate::parser::k_full_for_matmul;
 
-/// Find K_full for a subgraph: the full reduction dimension of the "final" MatMul.
-fn find_k_full(ops: &[usize], problem: &Problem, dag: &DagInfo) -> Option<i64> {
-    let op_set: HashSet<usize> = ops.iter().copied().collect();
-    ops.iter().find_map(|&op_idx| {
-        let op = &problem.ops[op_idx];
-        if !op.is_matmul() {
-            return None;
-        }
-        let out_t = op.outputs[0];
-        // Is this op's output a boundary output (graph output or consumed outside)?
-        let is_boundary = dag.graph_outputs.contains(&out_t)
-            || dag.tensor_consumers[out_t]
-                .iter()
-                .any(|c| !op_set.contains(c));
-        if is_boundary {
-            Some(k_full_for_matmul(op, &problem.tensors))
-        } else {
-            None
-        }
-    })
+/// Find K_full for a subgraph: the minimum K_full across ALL MatMuls in the subgraph.
+/// Internal MatMuls (ephemeral output) still drive k-step counts, so we must consider them.
+fn find_k_full(ops: &[usize], problem: &Problem, _dag: &DagInfo) -> Option<i64> {
+    ops.iter()
+        .filter_map(|&op_idx| {
+            let op = &problem.ops[op_idx];
+            if op.is_matmul() {
+                Some(k_full_for_matmul(op, &problem.tensors))
+            } else {
+                None
+            }
+        })
+        .min()
 }
 
 /// Generate candidate w/h values for a given tensor dimension.

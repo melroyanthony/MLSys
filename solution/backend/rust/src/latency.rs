@@ -38,30 +38,55 @@ pub fn find_boundary_matmul_k_full(
     })
 }
 
-/// Compute cost for one step of a subgraph.
+/// Compute cost for MatMul ops only for one step of a subgraph.
 ///
 /// Each MatMul op is scaled by its own K_full:
 ///   base_cost * (k / K_full_for_this_op)
-/// Pointwise ops always pay full base_cost per step.
-pub fn compute_time_per_step(
+pub fn matmul_compute_per_step(
     subgraph_ops: &[usize],
     granularity: &Granularity,
     problem: &Problem,
-    _dag: &DagInfo,
 ) -> f64 {
     let k = granularity.k as f64;
-
     let mut total: f64 = 0.0;
     for &op_idx in subgraph_ops {
         let op = &problem.ops[op_idx];
         if op.is_matmul() {
             let op_k_full = k_full_for_matmul(op, &problem.tensors) as f64;
             total += op.base_cost as f64 * (k / op_k_full);
-        } else {
+        }
+    }
+    total
+}
+
+/// Compute cost for Pointwise ops only (independent of k).
+///
+/// Pointwise ops execute once per spatial tile (on the last k-step when in split-K mode).
+pub fn pointwise_compute(subgraph_ops: &[usize], problem: &Problem) -> f64 {
+    let mut total: f64 = 0.0;
+    for &op_idx in subgraph_ops {
+        let op = &problem.ops[op_idx];
+        if !op.is_matmul() {
             total += op.base_cost as f64;
         }
     }
     total
+}
+
+/// Compute cost for one step of a subgraph (legacy: all ops, every step).
+///
+/// Each MatMul op is scaled by its own K_full:
+///   base_cost * (k / K_full_for_this_op)
+/// Pointwise ops always pay full base_cost per step.
+#[allow(dead_code)]
+pub fn compute_time_per_step(
+    subgraph_ops: &[usize],
+    granularity: &Granularity,
+    problem: &Problem,
+    _dag: &DagInfo,
+) -> f64 {
+    matmul_compute_per_step(subgraph_ops, granularity, problem)
+        + pointwise_compute(subgraph_ops, problem)
 }
 
 /// Classify inputs/outputs needed per step for a subgraph.
@@ -221,17 +246,28 @@ pub fn subgraph_latency(
     let num_tiles_h = (h_out + h - 1) / h;
     let num_spatial_tiles = num_tiles_w * num_tiles_h;
 
-    // K-steps: driven by the boundary MatMul's K_full (the op whose split-K we're controlling).
-    // If there's no boundary MatMul (final output is from Pointwise), k is irrelevant: 1 k-step.
-    let has_matmul = subgraph_ops.iter().any(|&i| problem.ops[i].is_matmul());
-
-    let boundary_k_full = find_boundary_matmul_k_full(subgraph_ops, problem, dag);
-    let num_k_steps = match boundary_k_full {
+    // K-steps: driven by the minimum K_full across ALL MatMuls in the subgraph.
+    // Internal MatMuls (whose output is ephemeral) still need k-steps.
+    // If there is no MatMul at all, k is irrelevant: 1 k-step.
+    let min_k_full: Option<i64> = subgraph_ops
+        .iter()
+        .filter_map(|&op_idx| {
+            let op = &problem.ops[op_idx];
+            if op.is_matmul() {
+                Some(k_full_for_matmul(op, &problem.tensors))
+            } else {
+                None
+            }
+        })
+        .min();
+    let num_k_steps = match min_k_full {
         Some(kf) => (kf + k - 1) / k,
-        None => 1, // No boundary MatMul -> no split-K
+        None => 1,
     };
 
-    let compute_step = compute_time_per_step(subgraph_ops, granularity, problem, dag);
+    // Split compute: MatMul cost is paid every k-step; Pointwise cost only on the last k-step.
+    let matmul_compute = matmul_compute_per_step(subgraph_ops, granularity, problem);
+    let pw_compute = pointwise_compute(subgraph_ops, problem);
     let bw = problem.slow_memory_bandwidth as f64;
 
     let plan = build_memory_plan(
@@ -332,6 +368,13 @@ pub fn subgraph_latency(
 
             // Evict output on last k-step of each spatial tile
             let evict = if is_last_k { plan.out_evict_size } else { 0 };
+
+            // Pointwise ops execute only on the last k-step of each spatial tile.
+            let compute_step = if is_last_k {
+                matmul_compute + pw_compute
+            } else {
+                matmul_compute
+            };
 
             let mem_time = (load + evict) as f64 / bw;
             total_latency += f64::max(compute_step, mem_time);

@@ -422,24 +422,17 @@ def compute_subgraph_latency(
     num_tiles_h = math.ceil(H_out / h)
     num_spatial_tiles = num_tiles_w * num_tiles_h
 
-    # K-steps: derive from the boundary-output MatMul (the one whose reduction
-    # dimension determines the tiling loop). Fall back to first MatMul if none
-    # is a boundary output, or 1 for pure-Pointwise subgraphs.
+    # K-steps: derive from the minimum K_full across ALL MatMuls in the subgraph.
+    # Internal MatMuls (whose output is ephemeral) still need k-steps.
+    # If there is no MatMul at all, k is irrelevant: 1 k-step.
     matmul_ops = [op_idx for op_idx in subgraph_ops
                   if problem.ops[op_idx].op_type == "MatMul"]
     if matmul_ops:
-        # Prefer boundary-output MatMul
-        boundary_matmul = None
-        for op_idx in matmul_ops:
-            out_t = problem.ops[op_idx].outputs[0]
-            if out_t in boundary_outputs:
-                boundary_matmul = op_idx
-                break
-        ref_op = boundary_matmul if boundary_matmul is not None else matmul_ops[0]
-        k_full = _k_full_for_op(problem.ops[ref_op], problem)
-        num_k_steps = math.ceil(k_full / k)
+        min_k_full = min(
+            _k_full_for_op(problem.ops[op_idx], problem) for op_idx in matmul_ops
+        )
+        num_k_steps = math.ceil(min_k_full / k)
     else:
-        k_full = 1
         num_k_steps = 1
 
     is_split_k = num_k_steps > 1
@@ -447,15 +440,16 @@ def compute_subgraph_latency(
     # Build traversal sequence
     tile_sequence = traversal_order if traversal_order is not None else list(range(num_spatial_tiles))
 
-    # Compute time per step (constant)
-    compute_per_step = 0.0
+    # Split compute: MatMul cost paid every k-step; Pointwise cost only on last k-step.
+    matmul_compute_per_step = 0.0
+    pointwise_compute = 0.0
     for op_idx in subgraph_ops:
         op = problem.ops[op_idx]
         if op.op_type == "MatMul":
             k_full_op = _k_full_for_op(op, problem)
-            compute_per_step += op.base_cost * (k / k_full_op)
+            matmul_compute_per_step += op.base_cost * (k / k_full_op)
         else:
-            compute_per_step += op.base_cost
+            pointwise_compute += op.base_cost
 
     # Categorize boundary inputs
     lhs_inputs, rhs_streamed_inputs, pw_inputs = _categorize_inputs(
@@ -540,8 +534,11 @@ def compute_subgraph_latency(
                         if t_idx not in tensors_to_retain_after:
                             mem_out += (w * h) / bw
 
+            # Pointwise ops execute only on the last k-step of each spatial tile.
+            compute_this_step = matmul_compute_per_step + (pointwise_compute if is_last_k else 0.0)
+
             memory_time = mem_in + mem_out
-            step_latency = max(compute_per_step, memory_time)
+            step_latency = max(compute_this_step, memory_time)
             total_latency += step_latency
 
     return total_latency
