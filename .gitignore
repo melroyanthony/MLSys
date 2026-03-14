@@ -70,6 +70,10 @@ coverage/
 .nox/
 .hypothesis/
 
+# Rust
+target/
+Cargo.lock
+
 # Secrets (never commit)
 *.pem
 *.key
