@@ -112,25 +112,43 @@ pub fn parse_solution(json_str: &str) -> Result<Solution, String> {
 
         let g = grans_arr.get(i).and_then(|v| v.as_array())
             .ok_or(format!("granularities[{i}] not an array"))?;
+        if g.len() != 3 {
+            return Err(format!("granularities[{i}] must have exactly 3 elements, got {}", g.len()));
+        }
         let granularity = Granularity {
-            w: g[0].as_i64().unwrap_or(128),
-            h: g[1].as_i64().unwrap_or(128),
-            k: g[2].as_i64().unwrap_or(1),
+            w: g[0].as_i64().ok_or(format!("granularities[{i}][0] is not an integer"))?,
+            h: g[1].as_i64().ok_or(format!("granularities[{i}][1] is not an integer"))?,
+            k: g[2].as_i64().ok_or(format!("granularities[{i}][2] is not an integer"))?,
         };
 
-        let tensors_to_retain: Vec<usize> = retain_arr.get(i)
+        let retain_items = retain_arr.get(i)
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().map(|v| v.as_u64().unwrap_or(0) as usize).collect())
-            .unwrap_or_default();
+            .ok_or(format!("tensors_to_retain[{i}] not an array"))?;
+        let tensors_to_retain: Vec<usize> = retain_items.iter()
+            .enumerate()
+            .map(|(j, v)| v.as_u64()
+                .ok_or(format!("tensors_to_retain[{i}][{j}] is not a valid integer"))
+                .map(|n| n as usize))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let traversal_order: Option<Vec<i64>> = traversal_arr
-            .and_then(|arr| arr.get(i))
-            .and_then(|v| if v.is_null() { None } else { v.as_array() })
-            .map(|arr| arr.iter().map(|v| v.as_i64().unwrap_or(0)).collect());
+        let traversal_order: Option<Vec<i64>> = match traversal_arr.and_then(|arr| arr.get(i)) {
+            Some(v) if v.is_null() => None,
+            Some(v) => {
+                let arr = v.as_array()
+                    .ok_or(format!("traversal_orders[{i}] is not an array or null"))?;
+                let order: Vec<i64> = arr.iter()
+                    .enumerate()
+                    .map(|(j, v)| v.as_i64()
+                        .ok_or(format!("traversal_orders[{i}][{j}] is not an integer")))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Some(order)
+            }
+            None => None,
+        };
 
         let subgraph_latency = latencies_arr.get(i)
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
+            .ok_or(format!("subgraph_latencies[{i}] is not a number"))?;
 
         subgraphs.push(SubgraphDef {
             ops,

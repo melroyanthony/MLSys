@@ -44,18 +44,18 @@
 | 1 | F-14: Topological sort | 30.0 | Lowest effort, unblocks everything |
 | 2 | F-01: Problem JSON parser | 15.0 | Gate to all other work |
 | 2 | F-11: Solution JSON serializer | 15.0 | Gate to evaluation |
-| 3 | F-02: Latency model (roofline) | 7.5 | Core correctness |
-| 4 | F-13: Regression tests | 6.7 | Validate latency model early |
-| 5 | F-03: Working-set calculator | 10.0 | Prevents invalid schedules |
+| 3 | F-03: Working-set calculator | 10.0 | Prevents invalid schedules |
+| 4 | F-02: Latency model (roofline) | 7.5 | Core correctness |
+| 5 | F-13: Regression tests | 6.7 | Validate latency model early |
 | 6 | F-05: Op grouping / chain fusion | 5.0 | Primary latency reduction lever |
 | 6 | F-07: Tensor retention | 5.0 | Avoids double-transfer cost |
-| 7 | F-04: Baseline scheduler | 5.0 | Correctness baseline |
-| 8 | F-08: Split-K | 4.0 | Enables fusing memory-constrained MatMuls |
-| 9 | F-12: Benchmark runner | 3.3 | Enables scoring |
-| 10 | F-09: Recomputation | 2.6 | Useful for diamond graphs (benchmarks 1, 9) |
-| 11 | F-06: Granularity search | 2.0 | Needed but high effort |
-| 12 | F-15: Optimizer strategy | 1.5 | High effort, uncertain return |
-| 13 | F-10: Traversal order | 1.1 | Marginal gain (~8% per example 4B) |
+| 6 | F-04: Baseline scheduler | 5.0 | Correctness baseline |
+| 7 | F-08: Split-K | 4.0 | Enables fusing memory-constrained MatMuls |
+| 8 | F-12: Benchmark runner | 3.3 | Enables scoring |
+| 9 | F-09: Recomputation | 2.6 | Useful for diamond graphs (benchmarks 1, 9) |
+| 10 | F-06: Granularity search | 2.0 | Needed but high effort |
+| 11 | F-15: Optimizer strategy | 1.5 | High effort, uncertain return |
+| 12 | F-10: Traversal order | 1.1 | Marginal gain (~8% per example 4B); **implemented** despite low score |
 
 ---
 
