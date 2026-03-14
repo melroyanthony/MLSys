@@ -139,9 +139,9 @@ compute time vs. memory transfer time, and subgraphs execute strictly serially.
 - **NFR-005 Testability**: The implementation must include unit tests for latency calculation,
   working-set calculation, and granularity validation against the five worked examples in
   PROBLEM.md.
-- **NFR-006 Language**: Implementation in Python (primary) using typed data structures aligned
-  with `mlsys.h`. Python is chosen for rapid prototyping; the `mlsys.h` C++ header is the
-  authoritative interface contract.
+- **NFR-006 Language**: Dual-track implementation — Rust (Track A: compiled binary) and Python
+  (Track B: Gemini agent) using typed data structures aligned with `mlsys.h`. The `mlsys.h`
+  C++ header is the authoritative interface contract.
 
 ---
 
@@ -198,4 +198,4 @@ compute time vs. memory transfer time, and subgraphs execute strictly serially.
 | A-005 | The evaluation is scored purely by total latency — lower is better — with no tie-breaking criteria stated | Problem statement says "minimizing total latency" | If partial scores exist per benchmark, ranking strategy differs |
 | A-006 | All five benchmark files are scored equally; the contest score is the sum (or average) of latencies across benchmarks | Not stated; inferred from contest structure | May need to prioritize harder/larger benchmarks |
 | A-007 | `tensors_to_retain` can include graph input tensors that were loaded during a subgraph | Note in problem: "tensors_to_retain[k] specifies which output tensors (or loaded inputs)" — parenthetical explicitly covers this | Retention of reused inputs (like Tensor0 in benchmark 1) would require separate loading |
-| A-008 | The scheduler implementation will be written in Python; the C++ `Evaluate()` will be called via the contest's evaluation infrastructure, not reimplemented | The contest provides `mlsys.h` as the interface contract; Python is used for the solver | If the evaluator must be called locally, a Python-native latency reimplementation is needed |
+| A-008 | Track A is implemented in Rust (compiled binary); Track B is Python (Gemini agent). Both include a local evaluator matching C++ `Evaluate()` | The contest allows C++/Rust/etc. for Track A and Python for Track B | Both tracks must independently produce valid solutions |

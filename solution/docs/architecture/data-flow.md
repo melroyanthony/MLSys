@@ -126,15 +126,21 @@ flowchart TD
 
 ## Optimizer Stage Composition
 
-Each optimizer stage is a pure function: `ScheduleState -> ScheduleState`. They compose in a fixed pipeline order.
+Each optimizer stage mutates `Vec<SubgraphDef>` in place. They execute in a fixed sequence of 9 stages.
 
 ```mermaid
 flowchart LR
-    Baseline[Baseline<br>1 op/subgraph] --> Fusion[Fusion<br>Merge chains]
-    Fusion --> Retention[Retention<br>Keep tensors resident]
-    Retention --> SplitK[Split-K<br>Reduce k for tight memory]
-    SplitK --> Granularity[Granularity Search<br>Optimize w,h per subgraph]
-    Granularity --> FinalLatency[Final Latency<br>Recalculate all]
+    S1[1. Baseline<br>1 op/subgraph<br>native granularity]
+    S2[2. Greedy Fusion<br>Merge adjacent ops]
+    S3[3. Retention pass 1<br>Keep tensors resident]
+    S4[4. Split-K<br>Reduce k for OOM relief]
+    S5[5. Granularity Search<br>Optimize w,h,k per subgraph]
+    S6[6. Retention pass 2<br>Re-evaluate after granularity changes]
+    S7[7. Emergency OOM Fix<br>Reduce granularity for any remaining OOM]
+    S8[8. Final Latency<br>Recalculate all subgraph latencies]
+    S9[9. Traversal Optimization<br>Snake order for MatMul data reuse]
+
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8 --> S9
 ```
 
 Each stage only improves or maintains the schedule -- never degrades it. If a stage finds no improvement, it passes the schedule through unchanged.

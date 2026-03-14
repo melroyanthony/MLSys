@@ -22,10 +22,11 @@ is computed as a unit; intermediate tensors between fused ops stay in fast
 memory and are never written back to DRAM. The scheduler also decides which
 boundary tensors to **retain** in fast memory between consecutive subgraphs.
 
-The score is the sum of `subgraph_latency` across all subgraphs, where:
+The score is the sum of `subgraph_latency` across all subgraphs, where each
+subgraph's latency is the sum of per-step roofline costs:
 
 ```
-subgraph_latency = max(total_compute_cost, total_slow_memory_transfer_time)
+subgraph_latency = sum( max(compute_time, memory_time) for each tile step )
 ```
 
 Lower is better.
@@ -119,7 +120,7 @@ unavailable.
 Both tracks share the same conceptual optimizer pipeline. Track A implements
 it in Rust; Track B re-implements it in Python (`scheduler.py` + `evaluator.py`).
 
-### Optimizer Pipeline (8 stages)
+### Optimizer Pipeline (9 stages)
 
 ```
 Input JSON
@@ -133,28 +134,26 @@ Stage 1  BASELINE
 Stage 2  GREEDY CHAIN FUSION
          Merge adjacent ops (in topological order) when:
            - the merged working set fits in fast memory
-           - fusing reduces total latency (no DRAM round-trip for
-             intermediate tensor)
+           - boundary output dimensions are consistent
          Multiple passes until no further merges are possible.
     |
     v
 Stage 3  RETENTION (pass 1)
          For each pair of consecutive subgraphs, decide whether keeping
-         a shared boundary tensor resident in fast memory (rather than
-         writing then re-reading it) lowers total latency.
+         a shared boundary tensor resident in fast memory lowers total
+         latency.
     |
     v
 Stage 4  SPLIT-K
          For MatMul subgraphs that still OOM at native granularity,
-         reduce the k-dimension (contraction depth) until the working
-         set fits, trading compute parallelism for memory feasibility.
+         reduce the k-dimension (using min K_full across ops) until
+         the working set fits.
     |
     v
 Stage 5  GRANULARITY SEARCH
-         For each subgraph, grid-search over (w, h) tile sizes that
-         are divisors of the output tensor dimensions. Pick the size
-         that minimises subgraph_latency subject to the OOM constraint.
-         For MatMul, also searches over k (split-K depth).
+         For each subgraph, grid-search over (w, h, k) tile sizes.
+         Pick the configuration that minimises subgraph_latency
+         subject to the OOM constraint.
     |
     v
 Stage 6  RETENTION (pass 2)
@@ -162,14 +161,19 @@ Stage 6  RETENTION (pass 2)
     |
     v
 Stage 7  EMERGENCY OOM FIX
-         Any subgraph that still OOMs (e.g., due to unusually large
-         tensors) has its granularity reduced to the smallest feasible
-         power-of-two tile.
+         Any subgraph that still OOMs has its granularity reduced to
+         the smallest feasible power-of-two tile.
     |
     v
 Stage 8  FINAL LATENCY RECALCULATION
          Recompute subgraph_latency for every subgraph with its final
          granularity and retention decisions.
+    |
+    v
+Stage 9  TRAVERSAL OPTIMIZATION
+         For MatMul subgraphs with multiple spatial tiles, compare
+         raster order vs snake (zig-zag) order. Pick the order that
+         minimises memory transfer by maximising data reuse.
     |
     v
 Output JSON

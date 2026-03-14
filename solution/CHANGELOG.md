@@ -20,7 +20,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `latency.rs` — Subgraph latency model: tile-level compute cost, slow-memory
     transfer time, working-set tracking, roofline calculation.
   - `memory.rs` — Fast-memory OOM check for a given subgraph and granularity.
-  - `evaluate.rs` — Full solution evaluator (used in tests).
+  - `evaluate.rs` — Full solution evaluator; also exposed via CLI evaluate
+    subcommand (`./mlsys evaluate --problem <f> --solution <f>`).
   - `serializer.rs` — Serialises `Solution` to the contest output JSON format.
   - `baseline.rs` — Initial schedule: one subgraph per op at native granularity.
   - `optimizer/fusion.rs` — Greedy chain fusion: merges adjacent ops when
@@ -31,9 +32,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     that OOM at native granularity.
   - `optimizer/granularity.rs` — Granularity grid search: finds the (w, h, k)
     that minimises subgraph latency subject to memory feasibility.
-  - `optimizer/pipeline.rs` — 8-stage pipeline orchestrator:
+  - `optimizer/traversal.rs` — Traversal order optimization: compares raster
+    vs snake (zig-zag) tile order for MatMul subgraphs, picks lower latency.
+  - `optimizer/pipeline.rs` — 9-stage pipeline orchestrator:
     baseline → fusion → retention → split-K → granularity search →
-    retention (pass 2) → emergency OOM fix → final latency recalculation.
+    retention (pass 2) → emergency OOM fix → final latency recalculation →
+    traversal optimization.
 
 - **Track B: Python Gemini agent** (`solution/agent/`)
   - `evaluator.py` — Pure-Python latency model; mirrors the Rust latency
@@ -59,6 +63,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Split-K: enables memory-feasible MatMul execution under tight capacity.
   - Granularity search: tunes tile size to balance compute and memory at
     the roofline equilibrium point.
+  - Traversal optimization: snake/zig-zag tile order for MatMul data reuse.
 
 - **Test suite**
   - 15 Rust unit tests in `src/main.rs`:

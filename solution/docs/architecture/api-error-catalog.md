@@ -6,39 +6,39 @@ This project is a CLI tool, not a web service. There are no HTTP status codes or
 
 ## Error Categories
 
-### Input Errors (raised during parsing)
+### Input Errors (returned during parsing / file I/O)
 
-| Error Code | Exception | Message Pattern | When |
-|------------|-----------|-----------------|------|
-| `INPUT_FILE_NOT_FOUND` | `FileNotFoundError` | `Problem file not found: {path}` | CLI given nonexistent path |
-| `INPUT_MALFORMED_JSON` | `json.JSONDecodeError` | `Malformed JSON in problem file: {detail}` | Invalid JSON syntax |
-| `INPUT_MISSING_FIELD` | `ValueError` | `Missing required field: {field}` | JSON lacks a required key |
-| `INPUT_DIMENSION_MISMATCH` | `ValueError` | `widths has {n} entries but heights has {m}` | Array length inconsistency |
-| `INPUT_UNKNOWN_OP_TYPE` | `ValueError` | `Unknown op_type: {type}` | Op type is not MatMul or Pointwise |
-| `INPUT_INVALID_TENSOR_REF` | `ValueError` | `Op {k} references tensor {t} but only {n} tensors exist` | Tensor index out of range |
+| Error Code | Rust Error Type | Message Pattern | When |
+|------------|----------------|-----------------|------|
+| `INPUT_FILE_NOT_FOUND` | `std::io::Error` | `Error reading input file '{path}': {io_error}` | CLI given nonexistent path |
+| `INPUT_MALFORMED_JSON` | `serde_json::Error` | `Error parsing problem: {serde_error}` | Invalid JSON syntax |
+| `INPUT_MISSING_FIELD` | `Result<T, String>` with descriptive message | `Missing required field: {field}` | JSON lacks a required key |
+| `INPUT_DIMENSION_MISMATCH` | `Result<T, String>` with descriptive message | `widths has {n} entries but heights has {m}` | Array length inconsistency |
+| `INPUT_UNKNOWN_OP_TYPE` | `Result<T, String>` with descriptive message | `Unknown op_type: {type}` | Op type is not MatMul or Pointwise |
+| `INPUT_INVALID_TENSOR_REF` | `Result<T, String>` with descriptive message | `Op {k} references tensor {t} but only {n} tensors exist` | Tensor index out of range |
 
-### DAG Errors (raised during graph analysis)
+### DAG Errors (returned during graph analysis)
 
-| Error Code | Exception | Message Pattern | When |
-|------------|-----------|-----------------|------|
-| `DAG_CYCLE_DETECTED` | `ValueError` | `Graph contains a cycle involving op {k}` | Topological sort fails |
-| `DAG_DISCONNECTED_OP` | `ValueError` | `Op {k} has no input tensors and no output tensors` | Orphan operation |
+| Error Code | Rust Error Type | Message Pattern | When |
+|------------|----------------|-----------------|------|
+| `DAG_CYCLE_DETECTED` | `Result<DagInfo, String>` | `DAG has a cycle` | Topological sort fails (Kahn's algorithm detects unresolvable in-degrees) |
+| `DAG_INVALID_TENSOR_REF` | `Result<DagInfo, String>` | `Op {k} references output tensor {t} but only {n} tensors exist` | Tensor index out of range during DAG build |
 
-### Scheduling Errors (raised during optimization)
+### Scheduling Errors (handled internally by optimizer)
 
-| Error Code | Exception | Message Pattern | When |
-|------------|-----------|-----------------|------|
-| `SCHEDULE_OOM` | `RuntimeError` | `Subgraph {i} exceeds fast memory: working_set={ws} > capacity={cap}` | No valid granularity found |
-| `SCHEDULE_UNCOVERED_OP` | `RuntimeError` | `Op {k} is not covered by any subgraph` | Internal logic error |
-| `SCHEDULE_INVALID_TRAVERSAL` | `ValueError` | `Traversal order for subgraph {i} is not a valid permutation of [0, {n})` | Bad traversal order |
+| Error Code | Handling | Message Pattern | When |
+|------------|----------|-----------------|------|
+| `SCHEDULE_OOM` | Emergency OOM fix stage reduces granularity; no panic | Logged to stderr if no valid granularity found | Working set exceeds fast_memory_capacity for all candidates |
+| `SCHEDULE_UNCOVERED_OP` | Internal invariant; pipeline guarantees coverage | N/A | Should not occur for valid problems |
+| `SCHEDULE_INVALID_TRAVERSAL` | Traversal module skips invalid orders silently | N/A | Bad traversal order produced by traversal optimizer |
 
-### Validation Errors (raised during solution evaluation)
+### Validation Errors (evaluate subcommand)
 
-| Error Code | Exception | Message Pattern | When |
-|------------|-----------|-----------------|------|
-| `EVAL_LATENCY_MISMATCH` | `ValueError` | `Subgraph {i}: reported latency {reported} != calculated {calculated}` | Self-check failed |
-| `EVAL_SOLUTION_FILE_INVALID` | `ValueError` | `Solution JSON missing required field: {field}` | Bad solution file |
-| `EVAL_DIMENSION_MISMATCH` | `ValueError` | `Subgraph {i} granularity w={w} does not divide output width={W}` | Invalid granularity |
+| Error Code | Rust Error Type | Message Pattern | When |
+|------------|----------------|-----------------|------|
+| `EVAL_LATENCY_MISMATCH` | `Result<T, String>` with descriptive message | Printed via `println!("FAIL: {}")` | Reported latency does not match recalculated latency |
+| `EVAL_SOLUTION_FILE_INVALID` | `serde_json::Error` | `Error parsing solution: {serde_error}` | Solution JSON missing or malformed |
+| `EVAL_OOM_VIOLATION` | `Result<T, String>` with descriptive message | `FAIL: {detail}` | Subgraph working set exceeds capacity |
 
 ---
 
@@ -47,6 +47,6 @@ This project is a CLI tool, not a web service. There are no HTTP status codes or
 | Code | Meaning |
 |------|---------|
 | 0 | Success: solution produced and valid |
-| 1 | Input error: file not found, malformed JSON, or invalid problem |
-| 2 | Scheduling error: OOM or uncovered ops (should not happen for valid problems) |
-| 3 | Validation error: solution failed self-check |
+| 1 | Any error: file not found, malformed JSON, invalid problem, cyclic DAG, or evaluation failure |
+
+All errors are reported via `eprintln!` to stderr, then `std::process::exit(1)`. The evaluate subcommand prints `PASS` or `FAIL: {reason}` to stdout and exits with code 1 on failure.

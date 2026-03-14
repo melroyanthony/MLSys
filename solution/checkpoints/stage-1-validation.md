@@ -25,9 +25,10 @@
 - **Greedy fusion as MVP optimizer**: Full DP/beam-search optimization is deferred (Won't Have
   for MVP). Greedy bottom-up chain fusion + tensor retention + split-K covers the primary
   latency reduction levers with manageable implementation effort.
-- **Python implementation**: Rapid prototyping in Python; C++ `Evaluate()` in `mlsys.h` is
-  the authoritative evaluator and will be used as the external validator.
-- **Traversal order deferred**: ~8% marginal gain (per Example 4B); deferred to Could-Have.
+- **Dual-track implementation**: Rust (Track A) for compiled binary, Python (Track B) for
+  Gemini agent. Both include local evaluators matching C++ `Evaluate()`.
+- **Traversal order**: Originally deferred as Could-Have; later implemented as Stage 9
+  (snake/zig-zag traversal optimization).
 - **Recomputation deferred**: Could-Have; selective residency (F-07) achieves similar gains
   in most graphs without the complexity of graph rewriting.
 

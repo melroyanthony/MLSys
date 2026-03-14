@@ -8,44 +8,44 @@
  * here to document module-level architecture within a single process.
  */
 
-workspace "MLSys DAG Scheduler" "Computational graph scheduler for memory-constrained AI accelerators" {
+workspace "MLSys DAG Scheduler" "Computational graph scheduler for memory-constrained AI accelerators. Track A: Rust binary. Track B: Python agent." {
 
     model {
         user = person "User" "Contest participant or researcher running the scheduler"
         evaluator = softwareSystem "C++ Evaluator" "Reference Evaluate() in mlsys.h that scores solutions" "External"
 
-        scheduler = softwareSystem "MLSys Scheduler" "Python CLI tool" {
+        scheduler = softwareSystem "MLSys Scheduler (Track A)" "Rust CLI binary" {
 
-            cli = container "CLI" "Entry point" "Python (argparse)" {
-                description "Reads problem JSON, invokes optimizer pipeline, writes solution JSON"
+            cli = container "CLI" "Entry point" "Rust" {
+                description "Reads problem JSON, invokes optimizer pipeline, writes solution JSON. Subcommands: solve (default) and evaluate."
             }
 
-            parser = container "Parser" "JSON -> Problem" "Python" {
-                description "Deserializes problem JSON into typed Problem struct"
+            parser = container "Parser" "JSON -> Problem" "Rust" {
+                description "Deserializes problem JSON into typed Problem struct using serde_json"
             }
 
-            serializer = container "Serializer" "Solution -> JSON" "Python" {
-                description "Serializes Solution struct into output JSON"
+            serializer = container "Serializer" "Solution -> JSON" "Rust" {
+                description "Serializes Solution struct into output JSON using serde_json"
             }
 
-            dagModule = container "DAG Module" "Graph analysis" "Python" {
-                description "Topological sort, adjacency lists, graph input/output identification"
+            dagModule = container "DAG Module" "Graph analysis" "Rust" {
+                description "Topological sort (Kahn's), adjacency lists, graph input/output identification"
             }
 
-            latencyModel = container "Latency Model" "Roofline calculator" "Python" {
+            latencyModel = container "Latency Model" "Roofline calculator" "Rust" {
                 description "Computes per-step and per-subgraph latency using roofline model"
             }
 
-            memoryModel = container "Memory Model" "Working-set calculator" "Python" {
+            memoryModel = container "Memory Model" "Working-set calculator" "Rust" {
                 description "Computes working-set size, checks OOM constraints"
             }
 
-            baseline = container "Baseline Scheduler" "Naive schedule" "Python" {
+            baseline = container "Baseline Scheduler" "Naive schedule" "Rust" {
                 description "One op per subgraph, native granularity, no retention"
             }
 
-            optimizerPipeline = container "Optimizer Pipeline" "Schedule refinement" "Python" {
-                description "Orchestrates fusion, retention, split-K, and granularity search"
+            optimizerPipeline = container "Optimizer Pipeline" "Schedule refinement" "Rust" {
+                description "Orchestrates 9 optimizer stages: baseline, fusion, retention x2, split-K, granularity search, emergency OOM fix, latency recalculation, traversal optimization"
 
                 fusionComponent = component "Fusion" "Greedy chain fusion" {
                     description "Merges adjacent ops into subgraphs where working set fits"

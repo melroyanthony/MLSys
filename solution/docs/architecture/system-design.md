@@ -2,7 +2,7 @@
 
 ## System Type
 
-This is a **computational optimization tool**, not a web service. It is a single-process Python CLI that reads a problem JSON, computes an optimized execution schedule, and writes a solution JSON.
+This is a **computational optimization tool**, not a web service. It is a single-process Rust CLI (Track A) + Python agent (Track B) that reads a problem JSON, computes an optimized execution schedule, and writes a solution JSON.
 
 ## Scale Estimates
 
@@ -16,47 +16,48 @@ This is a **computational optimization tool**, not a web service. It is a single
 ## Module Decomposition
 
 ```
-mlsys_scheduler/
-    __init__.py
-    cli.py                  # Entry point: argparse, file I/O
-    models.py               # Data classes (Problem, Tensor, Op, Granularity, Subgraph, Solution)
-    parser.py               # JSON -> Problem
-    serializer.py           # Solution -> JSON
-    dag.py                  # DAG utilities: topological sort, adjacency, reachability
-    latency.py              # Latency model: compute_time, memory_time, subgraph_latency
-    memory.py               # Working-set calculator, OOM checker
-    baseline.py             # Naive scheduler: one op per subgraph, native granularity
+src/
+    main.rs                 # Entry point: CLI subcommands (solve + evaluate), file I/O
+    models.rs               # Rust structs (Problem, Tensor, Op, Granularity, SubgraphDef, Solution)
+    parser.rs               # JSON -> Problem (serde_json)
+    serializer.rs           # Solution -> JSON (serde_json)
+    dag.rs                  # DAG utilities: topological sort (Kahn's), adjacency, reachability
+    latency.rs              # Latency model: compute_time, memory_time, subgraph_latency
+    memory.rs               # Working-set calculator, OOM checker
+    baseline.rs             # Naive scheduler: one op per subgraph, native granularity
+    evaluate.rs             # Standalone solution evaluator (evaluate subcommand)
     optimizer/
-        __init__.py
-        fusion.py           # Greedy bottom-up chain fusion
-        retention.py        # Tensor retention decision logic
-        splitk.py           # Split-K search for MatMul subgraphs
-        granularity.py      # Granularity search (w, h, k candidates)
-        traversal.py        # Traversal order optimization (snake/zig-zag)
-        pipeline.py         # Orchestrates optimizer stages in sequence
+        mod.rs              # Module declarations
+        fusion.rs           # Greedy bottom-up chain fusion
+        retention.rs        # Tensor retention decision logic
+        splitk.rs           # Split-K search for MatMul subgraphs
+        granularity.rs      # Granularity search (w, h, k candidates)
+        traversal.rs        # Traversal order optimization (snake/zig-zag)
+        pipeline.rs         # Orchestrates all 9 optimizer stages in sequence
 ```
 
 ### Module Dependency Graph
 
 ```mermaid
 graph TD
-    CLI[cli.py] --> Parser[parser.py]
-    CLI --> Serializer[serializer.py]
-    CLI --> Pipeline[optimizer/pipeline.py]
+    Main[main.rs] --> Parser[parser.rs]
+    Main --> Serializer[serializer.rs]
+    Main --> Pipeline[optimizer/pipeline.rs]
+    Main --> Evaluate[evaluate.rs]
 
-    Parser --> Models[models.py]
+    Parser --> Models[models.rs]
     Serializer --> Models
 
-    Pipeline --> Baseline[baseline.py]
-    Pipeline --> Fusion[optimizer/fusion.py]
-    Pipeline --> Retention[optimizer/retention.py]
-    Pipeline --> SplitK[optimizer/splitk.py]
-    Pipeline --> Granularity[optimizer/granularity.py]
-    Pipeline --> Traversal[optimizer/traversal.py]
+    Pipeline --> Baseline[baseline.rs]
+    Pipeline --> Fusion[optimizer/fusion.rs]
+    Pipeline --> Retention[optimizer/retention.rs]
+    Pipeline --> SplitK[optimizer/splitk.rs]
+    Pipeline --> Granularity[optimizer/granularity.rs]
+    Pipeline --> Traversal[optimizer/traversal.rs]
 
-    Baseline --> DAG[dag.py]
-    Baseline --> Latency[latency.py]
-    Baseline --> Memory[memory.py]
+    Baseline --> DAG[dag.rs]
+    Baseline --> Latency[latency.rs]
+    Baseline --> Memory[memory.rs]
 
     Fusion --> DAG
     Fusion --> Memory
@@ -78,49 +79,49 @@ graph TD
 
 ## Data Model
 
-All data structures are Python `dataclasses` with type annotations. They mirror the C++ structs in `mlsys.h`.
+All data structures are Rust structs with derived traits. They mirror the C++ structs in `mlsys.h`.
 
 ### Core Types
 
-```python
-@dataclass
-class Tensor:
-    width: int       # number of columns
-    height: int      # number of rows
-    # size = width * height (elements, not bytes)
+```rust
+pub struct Tensor {
+    pub width: i64,    // number of columns
+    pub height: i64,   // number of rows
+    // size = width * height (elements, not bytes)
+}
 
-@dataclass
-class Op:
-    op_type: str     # "MatMul" or "Pointwise"
-    inputs: list[int]   # tensor indices consumed (for MatMul: [LHS, RHS])
-    outputs: list[int]  # tensor indices produced
-    base_cost: int      # compute cost at native granularity per tile
+pub struct Op {
+    pub op_type: String,    // "MatMul" or "Pointwise"
+    pub inputs: Vec<usize>, // tensor indices consumed (for MatMul: [LHS, RHS])
+    pub outputs: Vec<usize>,// tensor indices produced
+    pub base_cost: i64,     // compute cost at native granularity per tile
+}
 
-@dataclass
-class Granularity:
-    w: int    # spatial width of output slice
-    h: int    # spatial height of output slice
-    k: int    # reduction depth (only meaningful for MatMul)
+pub struct Granularity {
+    pub w: i64,   // spatial width of output slice
+    pub h: i64,   // spatial height of output slice
+    pub k: i64,   // reduction depth (only meaningful for MatMul)
+}
 
-@dataclass
-class Problem:
-    tensors: list[Tensor]
-    ops: list[Op]
-    fast_memory_capacity: int
-    slow_memory_bandwidth: int
-    native_granularity: tuple[int, int]  # (native_w, native_h)
+pub struct Problem {
+    pub tensors: Vec<Tensor>,
+    pub ops: Vec<Op>,
+    pub fast_memory_capacity: i64,
+    pub slow_memory_bandwidth: i64,
+    pub native_granularity: (i64, i64),  // (native_w, native_h)
+}
 
-@dataclass
-class SubgraphDef:
-    ops: list[int]              # op indices in this subgraph
-    granularity: Granularity
-    tensors_to_retain: list[int]   # tensor indices to keep in fast memory after
-    traversal_order: list[int] | None  # permutation of tile indices, or None for raster
-    subgraph_latency: float
+pub struct SubgraphDef {
+    pub ops: Vec<usize>,              // op indices in this subgraph
+    pub granularity: Granularity,
+    pub tensors_to_retain: Vec<usize>,    // tensor indices to keep in fast memory after
+    pub traversal_order: Option<Vec<i64>>,// permutation of tile indices, or None for raster
+    pub subgraph_latency: f64,
+}
 
-@dataclass
-class Solution:
-    subgraphs: list[SubgraphDef]
+pub struct Solution {
+    pub subgraphs: Vec<SubgraphDef>,
+}
 ```
 
 ---
@@ -418,8 +419,9 @@ total_latency = sum(subgraph_latency for each subgraph)
 
 ## Performance Considerations
 
-1. **No NumPy needed**: The scheduler performs only integer arithmetic, comparisons, and list operations. Pure Python is sufficient.
+1. **Rust zero-cost abstractions**: The scheduler performs integer arithmetic, comparisons, and vector operations. Rust compiles to native code with no garbage collection pauses.
 2. **Granularity search space**: Limit candidates to powers of 2 that divide tensor dimensions. For a 4096-wide tensor: {128, 256, 512, 1024, 2048, 4096} -- at most 6 candidates per dimension.
 3. **Fusion feasibility check**: Before merging two subgraphs, check working-set OOM at the most restrictive granularity. This is O(1) per candidate merge.
 4. **Topological sort**: Kahn's algorithm, O(V + E), runs once.
-5. **Total optimizer complexity**: O(N^2) for fusion (N = number of ops), O(G) for granularity search per subgraph (G = candidate granularities). Well within the 5-minute budget even for benchmark 17.
+5. **Total optimizer complexity**: O(N^2) for fusion (N = number of ops), O(G) for granularity search per subgraph (G = candidate granularities). Well within the contest time budget even for benchmark 17.
+6. **Static binary**: `cargo build --release` with `lto = true` and `codegen-units = 1` produces a fully optimized, statically linked binary with no runtime dependencies.

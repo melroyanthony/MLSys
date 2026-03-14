@@ -95,11 +95,11 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 
 | Item | Why excluded | When to reconsider |
 |------|--------------|--------------------|
-| Traversal order optimization (F-10) | ~8% marginal gain on one subgraph type; lower ROI than remaining Should-Have items | After all Should-Have features are implemented and time remains |
+| ~~Traversal order optimization (F-10)~~ | ~~~8% marginal gain~~ **IMPLEMENTED** as Stage 9 (snake/zig-zag traversal) | N/A — implemented |
 | Recomputation / graph-rewrite (F-09) | Higher complexity, benefit depends on diamond graph frequency; selective residency (F-07) covers most of the same gain | If benchmarks 1 or 17 show large latency gaps attributable to shared intermediates |
 | Advanced optimizer: DP/beam search (F-15) | 16h estimated effort, uncertain gain over greedy given contest time constraints | If greedy fusion produces solutions >20% above known-optimal reference |
 | Multi-device / parallel subgraph execution | Explicitly excluded by the problem's strict serialization model | Never (hard problem constraint) |
-| C++ reimplementation | Python is sufficient for the scheduler; C++ evaluator is the contest infrastructure | Only if Python runtime exceeds 5-minute benchmark budget |
+| ~~C++ reimplementation~~ | ~~Python is sufficient~~ **SUPERSEDED**: Track A implemented in Rust for performance and static binary requirement | N/A — Rust chosen per ADR-001 |
 
 ---
 
