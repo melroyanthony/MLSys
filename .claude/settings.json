@@ -1,0 +1,89 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit",
+      "Write",
+      "Bash(git:*)",
+      "Bash(make:*)",
+      "Bash(npm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(python:*)",
+      "Bash(uv:*)",
+      "Bash(docker:*)",
+      "Bash(docker compose:*)",
+      "Bash(gh:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(chmod:*)",
+      "Bash(curl:*)",
+      "Bash(ruff:*)",
+      "Bash(pytest:*)",
+      "Bash(bandit:*)",
+      "Bash(terraform:*)",
+      "Bash(kubectl:*)",
+      "Bash(helm:*)",
+      "Bash(newman:*)"
+    ],
+    "deny": []
+  },
+  "model": "claude-sonnet-4-6-20250514",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/scripts/quality-gate.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c \"f=${CLAUDE_FILE_PATH:-}; case \\\"$f\\\" in *.md|*.rst|*.txt) echo \\\"[doc-warning] Modifying documentation file: $f\\\" >&2 ;; esac; exit 0\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c \"out=${CLAUDE_TOOL_OUTPUT:-}; echo \\\"$out\\\" | grep -oE 'https://github\\.com/[^/]+/[^/]+/pull/[0-9]+' | while IFS= read -r url; do echo \\\"[pr-log] Pull request created: $url\\\" >&2; done; exit 0\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/scripts/debug-check.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/scripts/commit-reminder.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
