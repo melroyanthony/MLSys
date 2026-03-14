@@ -143,7 +143,8 @@ pub fn check_oom(
     ) <= problem.fast_memory_capacity
 }
 
-/// Find the largest k (power-of-2 downward from max K_full) that fits in memory.
+/// Find the largest k (power-of-2 downward from min K_full) that fits in memory.
+/// Uses min K_full across all MatMuls so k never exceeds any op's reduction dimension.
 pub fn find_split_k(
     subgraph_ops: &[usize],
     granularity: &Granularity,
@@ -152,8 +153,8 @@ pub fn find_split_k(
     problem: &Problem,
     dag: &DagInfo,
 ) -> Option<i64> {
-    // Find the MAXIMUM K_full across all MatMul ops (for split-K search range)
-    let max_k_full = subgraph_ops
+    // Find the MINIMUM K_full across all MatMul ops so k is valid for every op
+    let min_k_full = subgraph_ops
         .iter()
         .filter_map(|&op_idx| {
             let op = &problem.ops[op_idx];
@@ -163,9 +164,9 @@ pub fn find_split_k(
                 None
             }
         })
-        .max();
+        .min();
 
-    let k_full = match max_k_full {
+    let k_full = match min_k_full {
         Some(kf) => kf,
         None => {
             // No MatMul ops -- try with k=1 for pointwise-only

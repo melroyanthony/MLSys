@@ -199,23 +199,11 @@ compute_time_per_step = sum(op.base_cost for op in subgraph.ops)
 - When granularity equals native: `base_cost` is the cost per tile, and `num_spatial_tiles` tiles cover the full tensor
 - When granularity is smaller: `base_cost` is still the cost per tile (hardware pads), but more tiles are needed
 
-**Reduction scaling**: For MatMul, `base_cost` is for one k-step at full native depth. When `k < K_full`:
-```
-compute_time_per_step = sum(op.base_cost * (k / K_full_for_op) for op in subgraph.ops)
-```
-Wait -- actually from the examples, the compute cost per step is just `base_cost` regardless of k. Let me re-examine.
+**Reduction scaling**: For MatMul, each k-step costs `base_cost * (k / K_full)` where `K_full` is the op's full reduction dimension. Verified against Example 5B: `k=32`, `K_full=128`, `base_cost=2000` per op, compute per step = `2000*(32/128) + 2000*(32/128) = 1000`.
 
-From Example 5B: `k=32`, `K_full=128`, `base_cost=2000` for each op. The compute per step is `1000`, which is `2000 * (32/128) + 2000 * (32/128) = 500 + 500 = 1000`. So for MatMul:
-```
-compute_per_step_for_matmul_op = base_cost * (k / K_full)
-```
+For Pointwise, k is irrelevant — full `base_cost` per step. Verified against Example 1C: `base_cost=1000+100=1100` per step, 4 tiles.
 
-For Pointwise: k is irrelevant, no scaling:
-```
-compute_per_step_for_pointwise_op = base_cost
-```
-
-**But from Example 1C**: `base_cost=1000` and `100`, granularity `64x64` (smaller than native `128x128`), compute per step = `1000 + 100 = 1100`. The number of tiles is 4. So `base_cost` is the compute cost per tile regardless of spatial granularity -- the hardware pads. This is confirmed.
+**Spatial padding**: if `w < native_w` or `h < native_h`, you still pay full `base_cost` per step (hardware pads), but need more spatial tiles to cover the tensor.
 
 **Summary**:
 ```

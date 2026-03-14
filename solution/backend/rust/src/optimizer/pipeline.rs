@@ -1,12 +1,15 @@
 /// Pipeline: orchestrates all optimizer stages in sequence.
 ///
 /// Stages:
-/// 1. Start with baseline (one op per subgraph, native granularity)
-/// 2. Greedy fusion (merge adjacent ops)
-/// 3. Split-K (handle OOM from large k)
-/// 4. Granularity search (find best w, h, k per subgraph)
-/// 5. Retention optimization (decide what to keep resident)
-/// 6. Final latency recalculation
+/// 1. Baseline (one op per subgraph, native granularity)
+/// 2. Greedy chain fusion (merge adjacent ops)
+/// 3. Retention pass 1 (decide what to keep resident)
+/// 4. Split-K (handle OOM from large k)
+/// 5. Granularity search (find best w, h, k per subgraph)
+/// 6. Retention pass 2 (re-evaluate after granularity changes)
+/// 7. Emergency OOM fix (reduce granularity for any remaining OOM)
+/// 8. Final latency recalculation
+/// 9. Traversal optimization (snake order for MatMul data reuse)
 
 use std::collections::HashSet;
 

@@ -224,7 +224,7 @@ def _build_solution_from_dict(data: dict, problem: Problem) -> Optional[Solution
                 ops=[int(x) for x in sg_ops_list[i]],
                 granularity=Granularity(int(g[0]), int(g[1]), int(g[2])),
                 tensors_to_retain=[int(x) for x in retain_list[i]],
-                traversal_order=trav_list[i] if trav_list[i] is not None else None,
+                traversal_order=[int(x) for x in trav_list[i]] if trav_list[i] is not None else None,
                 subgraph_latency=0.0,
             )
             subgraphs.append(sg)
@@ -246,14 +246,22 @@ def _validate_and_score(solution: Solution, problem: Problem) -> Optional[float]
     Returns None if the solution is invalid (OOM or coverage error).
     """
     try:
-        # Recompute latencies using our local model (overwrite Gemini's values)
-        from evaluator import compute_subgraph_latency as csl
+        import math
+        from evaluator import compute_subgraph_latency as csl, _output_tensor_for_subgraph
 
         retained: set[int] = set()
         total = 0.0
         for sg in solution.subgraphs:
             if not check_oom(sg.ops, sg.granularity, problem, retained):
                 return None
+            # Validate traversal_order is a valid permutation if present
+            if sg.traversal_order is not None:
+                out_t = _output_tensor_for_subgraph(sg.ops, problem)
+                num_tiles = (math.ceil(out_t.width / sg.granularity.w)
+                             * math.ceil(out_t.height / sg.granularity.h))
+                expected = set(range(num_tiles))
+                if set(sg.traversal_order) != expected or len(sg.traversal_order) != num_tiles:
+                    sg.traversal_order = None  # invalid, fall back to raster
             lat = csl(
                 sg.ops, sg.granularity, problem, retained, sg.traversal_order,
                 tensors_to_retain_after=set(sg.tensors_to_retain),

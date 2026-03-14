@@ -43,19 +43,35 @@ pub fn parse_problem(json_str: &str) -> Result<Problem, String> {
         .map(|(&w, &h)| Tensor { width: w, height: h })
         .collect();
 
-    let ops: Vec<Op> = raw
-        .inputs
-        .iter()
+    let num_tensors = tensors.len();
+    let mut ops: Vec<Op> = Vec::with_capacity(raw.inputs.len());
+    for (i, (((inp, out), &cost), op_type)) in raw.inputs.iter()
         .zip(raw.outputs.iter())
         .zip(raw.base_costs.iter())
         .zip(raw.op_types.iter())
-        .map(|(((inp, out), &cost), op_type)| Op {
+        .enumerate()
+    {
+        if op_type != "MatMul" && op_type != "Pointwise" {
+            return Err(format!("Op {i}: unknown op_type '{op_type}'"));
+        }
+        if op_type == "MatMul" && inp.len() != 2 {
+            return Err(format!("Op {i}: MatMul requires exactly 2 inputs, got {}", inp.len()));
+        }
+        if out.is_empty() {
+            return Err(format!("Op {i}: outputs must not be empty"));
+        }
+        for &t in inp.iter().chain(out.iter()) {
+            if t >= num_tensors {
+                return Err(format!("Op {i}: tensor index {t} out of range (num_tensors={num_tensors})"));
+            }
+        }
+        ops.push(Op {
             op_type: op_type.clone(),
             inputs: inp.clone(),
             outputs: out.clone(),
             base_cost: cost,
-        })
-        .collect();
+        });
+    }
 
     Ok(Problem {
         tensors,
@@ -88,8 +104,11 @@ pub fn parse_solution(json_str: &str) -> Result<Solution, String> {
         let ops: Vec<usize> = subgraphs_arr[i].as_array()
             .ok_or(format!("subgraphs[{i}] not an array"))?
             .iter()
-            .map(|v| v.as_u64().unwrap_or(0) as usize)
-            .collect();
+            .enumerate()
+            .map(|(j, v)| v.as_u64()
+                .ok_or(format!("subgraphs[{i}][{j}] is not a valid integer"))
+                .map(|n| n as usize))
+            .collect::<Result<Vec<_>, _>>()?;
 
         let g = grans_arr.get(i).and_then(|v| v.as_array())
             .ok_or(format!("granularities[{i}] not an array"))?;
@@ -134,16 +153,15 @@ pub fn k_full_for_matmul(op: &Op, tensors: &[Tensor]) -> i64 {
 }
 
 /// Granularity at native (w, h) for a subgraph.
-/// k is set to K_full for the first MatMul op in the subgraph, or 1 for pointwise-only.
+/// k is set to the minimum K_full across MatMul ops (safe for all ops), or 1 for pointwise-only.
 pub fn native_granularity_for_subgraph(
     ops: &[usize],
     problem: &Problem,
 ) -> Granularity {
     let (native_w, native_h) = problem.native_granularity;
-    // Find K_full from first MatMul in subgraph
     let k = ops
         .iter()
-        .find_map(|&op_idx| {
+        .filter_map(|&op_idx| {
             let op = &problem.ops[op_idx];
             if op.is_matmul() {
                 Some(k_full_for_matmul(op, &problem.tensors))
@@ -151,6 +169,7 @@ pub fn native_granularity_for_subgraph(
                 None
             }
         })
+        .min()
         .unwrap_or(1);
     Granularity { w: native_w, h: native_h, k }
 }

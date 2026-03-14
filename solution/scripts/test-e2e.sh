@@ -97,8 +97,10 @@ echo ""
 # ---------------------------------------------------------------------------
 echo "--- Track A: Building Rust binary ---"
 cd "$RUST_DIR"
-if cargo build --release 2>/dev/null; then
+RUST_BUILD_OK=false
+if cargo build --release; then
     pass "Track A: Rust build"
+    RUST_BUILD_OK=true
 else
     fail "Track A: Rust build failed"
 fi
@@ -110,7 +112,14 @@ RUST_BIN="$RUST_DIR/target/release/mlsys"
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- Track A: Running benchmarks ---"
+if [[ "$RUST_BUILD_OK" != "true" ]]; then
+    echo "Skipping Track A benchmarks due to build failure."
+fi
 for b in 1 5 9 13 17; do
+    if [[ "$RUST_BUILD_OK" != "true" ]]; then
+        fail "Track A benchmark $b: skipped (build failed)"
+        continue
+    fi
     out_file="$TMP_DIR/track-a-$b.json"
 
     stderr_output=$("$RUST_BIN" "$BENCH_DIR/mlsys-2026-$b.json" "$out_file" 2>&1 || true)
