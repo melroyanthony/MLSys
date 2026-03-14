@@ -16,15 +16,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `models.rs` — Core data types: `Problem`, `Op`, `Tensor`, `Solution`,
     `SubgraphDef`, `Granularity`.
   - `parser.rs` — Deserialises problem and solution JSON with strict validation
-    (op_type, MatMul arity, tensor bounds, granularity length).
+    (`op_type`, `MatMul` arity, tensor bounds, `Granularity` length).
   - `dag.rs` — DAG construction: topological sort (Kahn's), cycle detection,
     boundary tensor computation, predecessor/successor maps, tensor index bounds
     checking.
-  - `latency.rs` — Subgraph latency model: per-op K_full scaling for MatMul
+  - `latency.rs` — Subgraph latency model: per-op `K_full` scaling for `MatMul`
     (`base_cost * k/K_full`), roofline per step (`max(compute, memory)`),
     intra-subgraph data reuse tracking.
-  - `memory.rs` — Working-set calculator and OOM checker. Uses min K_full across
-    MatMuls for split-K search (safe for mixed-K subgraphs).
+  - `memory.rs` — Working-set calculator and OOM checker. Uses min `K_full` across
+    `MatMul` ops for split-K search (safe for mixed-K subgraphs).
   - `evaluate.rs` — Full solution evaluator: validates OOM, op coverage,
     traversal order permutation, and reported-vs-computed latency mismatch.
   - `serializer.rs` — Serialises `Solution` to contest JSON format with
@@ -49,8 +49,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Track B: Python Gemini agent** (`solution/agent/`)
   - `evaluator.py` — Pure-Python latency model mirroring Rust logic exactly.
-    Per-op K_full scaling, boundary-output MatMul K_full for num_k_steps,
-    widths/heights length validation.
+    Per-op `K_full` scaling, boundary-output `MatMul` `K_full` for `num_k_steps`,
+    `widths`/`heights` length validation.
   - `scheduler.py` — Python optimizer pipeline (baseline, fusion, split-K,
     granularity search, retention, traversal); runs without any API call.
   - `agent.py` — Agent loop: runs local optimizer first (safe fallback),

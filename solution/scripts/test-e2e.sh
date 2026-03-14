@@ -137,13 +137,13 @@ done
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- Track B: Verifying Python evaluator ---"
-if cd "$AGENT_DIR" && .venv/bin/python -c "from evaluator import *; print('evaluator imports OK')" 2>&1; then
+if cd "$AGENT_DIR" && uv run python -c "from evaluator import *; print('evaluator imports OK')" 2>&1; then
     pass "Track B: evaluator import"
 else
     fail "Track B: evaluator import failed"
 fi
 
-if cd "$AGENT_DIR" && .venv/bin/python -c "from scheduler import build_baseline, optimize; print('scheduler imports OK')" 2>&1; then
+if cd "$AGENT_DIR" && uv run python -c "from scheduler import build_baseline, optimize; print('scheduler imports OK')" 2>&1; then
     pass "Track B: scheduler import"
 else
     fail "Track B: scheduler import failed"
@@ -158,7 +158,7 @@ for b in 1 5 9 13 17; do
     out_file="$TMP_DIR/track-b-$b.json"
 
     cd "$AGENT_DIR"
-    GOOGLE_API_KEY=dummy .venv/bin/python agent.py \
+    GOOGLE_API_KEY=dummy uv run python agent.py \
         "$BENCH_DIR/mlsys-2026-$b.json" "$out_file" 2>/dev/null || true
 
     if [[ -f "$out_file" ]]; then
