@@ -74,6 +74,9 @@ coverage/
 target/
 Cargo.lock
 
+# Claude Code config
+.claude/
+
 # Secrets (never commit)
 *.pem
 *.key
