@@ -30,7 +30,7 @@ For each (w, h, k) candidate:
 2. Compute total subgraph latency as the sum of per-step roofline costs across all tiles and k-steps
 3. Select the (w, h, k) triple that minimizes total subgraph latency
 
-Using min(K_full) across MatMuls ensures k divides all reduction dimensions in the subgraph, keeping the schedule valid for every MatMul op.
+Using min(K_full) across MatMuls ensures k never exceeds any op's reduction dimension. Note: k candidates are powers of 2, so `ceil(K_full / k)` correctly handles cases where k does not evenly divide K_full — the last k-step simply processes the remainder.
 
 ## Consequences
 

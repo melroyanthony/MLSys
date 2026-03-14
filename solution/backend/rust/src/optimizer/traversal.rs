@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 
 use crate::dag::DagInfo;
-use crate::latency::{find_boundary_matmul_k_full, compute_time_per_step, build_memory_plan_pub};
+use crate::latency::{compute_num_k_steps, compute_time_per_step, build_memory_plan_pub};
 use crate::models::{Granularity, Problem, SubgraphDef};
 
 /// Generate snake (zig-zag) traversal order for a grid of (num_tiles_w × num_tiles_h) tiles.
@@ -62,11 +62,7 @@ pub fn latency_with_traversal(
 
     // This function only applies to spatial-only tiling (k == k_full → 1 k-step).
     // Split-K subgraphs don't benefit from traversal reordering.
-    let boundary_k_full = find_boundary_matmul_k_full(subgraph_ops, problem, dag);
-    let num_k_steps = match boundary_k_full {
-        Some(kf) => (kf + granularity.k - 1) / granularity.k,
-        None => 1,
-    };
+    let num_k_steps = compute_num_k_steps(subgraph_ops, granularity.k, problem);
     if num_k_steps != 1 {
         // Fall back to standard raster latency for split-K subgraphs.
         return crate::latency::subgraph_latency(
@@ -196,11 +192,7 @@ pub fn optimize_traversal(
         return None;
     }
 
-    let boundary_k_full = find_boundary_matmul_k_full(subgraph_ops, problem, dag);
-    let num_k_steps = match boundary_k_full {
-        Some(kf) => (kf + granularity.k - 1) / granularity.k,
-        None => 1,
-    };
+    let num_k_steps = compute_num_k_steps(subgraph_ops, granularity.k, problem);
 
     // Only useful for spatial-only tiling (no split-K).
     if num_k_steps != 1 {

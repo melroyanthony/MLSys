@@ -71,9 +71,9 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 - [ ] The `subgraph_latencies` values in every output JSON match the latency model to within
   floating-point tolerance (validated by `Evaluate()` or the Python re-implementation)
 - [ ] No solution contains a working set exceeding `fast_memory_capacity` for any benchmark
-- [ ] For MatMul subgraphs, the chosen `k` is the largest power-of-2 divisor of `K_full` that
-  keeps the working set within `fast_memory_capacity` (k is never 1 unless all larger values
-  violate OOM)
+- [ ] For MatMul subgraphs, `k` is searched from `K_full` down to 1 (powers of 2) and the
+  `(w, h, k)` triple that minimizes total subgraph latency within `fast_memory_capacity` is
+  selected (larger `k` is preferred as a tie-breaker when latencies are equal)
 
 ---
 

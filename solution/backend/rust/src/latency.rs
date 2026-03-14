@@ -227,6 +227,30 @@ fn build_memory_plan(
     }
 }
 
+/// Compute num_k_steps for a subgraph: ceil(min_K_full / k) across all MatMuls.
+/// Returns 1 if there are no MatMul ops.
+pub fn compute_num_k_steps(
+    subgraph_ops: &[usize],
+    k: i64,
+    problem: &Problem,
+) -> i64 {
+    let min_k_full: Option<i64> = subgraph_ops
+        .iter()
+        .filter_map(|&op_idx| {
+            let op = &problem.ops[op_idx];
+            if op.is_matmul() {
+                Some(k_full_for_matmul(op, &problem.tensors))
+            } else {
+                None
+            }
+        })
+        .min();
+    match min_k_full {
+        Some(kf) => (kf + k - 1) / k,
+        None => 1,
+    }
+}
+
 /// Compute total subgraph latency using the roofline model.
 pub fn subgraph_latency(
     subgraph_ops: &[usize],
@@ -246,24 +270,7 @@ pub fn subgraph_latency(
     let num_tiles_h = (h_out + h - 1) / h;
     let num_spatial_tiles = num_tiles_w * num_tiles_h;
 
-    // K-steps: driven by the minimum K_full across ALL MatMuls in the subgraph.
-    // Internal MatMuls (whose output is ephemeral) still need k-steps.
-    // If there is no MatMul at all, k is irrelevant: 1 k-step.
-    let min_k_full: Option<i64> = subgraph_ops
-        .iter()
-        .filter_map(|&op_idx| {
-            let op = &problem.ops[op_idx];
-            if op.is_matmul() {
-                Some(k_full_for_matmul(op, &problem.tensors))
-            } else {
-                None
-            }
-        })
-        .min();
-    let num_k_steps = match min_k_full {
-        Some(kf) => (kf + k - 1) / k,
-        None => 1,
-    };
+    let num_k_steps = compute_num_k_steps(subgraph_ops, k, problem);
 
     // Split compute: MatMul cost is paid every k-step; Pointwise cost only on the last k-step.
     let matmul_compute = matmul_compute_per_step(subgraph_ops, granularity, problem);

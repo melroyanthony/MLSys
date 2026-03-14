@@ -236,17 +236,18 @@ compute_time_per_step = sum(op.base_cost for op in subgraph.ops)
 
 **Reduction scaling**: For MatMul, each k-step costs `base_cost * (k / K_full)` where `K_full` is the op's full reduction dimension. Verified against Example 5B: `k=32`, `K_full=128`, `base_cost=2000` per op, compute per step = `2000*(32/128) + 2000*(32/128) = 1000`.
 
-For Pointwise, k is irrelevant -- full `base_cost` per step. Verified against Example 1C: `base_cost=1000+100=1100` per step, 4 tiles.
+For Pointwise, k is irrelevant — the op executes **once per spatial tile** (on the last k-step only). In a fused subgraph with k-steps from a MatMul, Pointwise compute is added only on the final k-step of each spatial tile, not every step. Verified against Example 1C (pure Pointwise, no k-steps): `base_cost=1000+100=1100` per tile, 4 tiles.
 
 **Spatial padding**: if `w < native_w` or `h < native_h`, you still pay full `base_cost` per step (hardware pads), but need more spatial tiles to cover the tensor.
 
 **Summary**:
 ```
-For each op in subgraph:
-    if op.op_type == "MatMul":
-        compute_cost = op.base_cost * (k / K_full_for_this_op)
-    else:  # Pointwise
-        compute_cost = op.base_cost
+For each k-step of a spatial tile:
+  matmul_compute = sum(op.base_cost * (k / K_full) for MatMul ops)
+  if is_last_k_step:
+      compute = matmul_compute + sum(op.base_cost for Pointwise ops)
+  else:
+      compute = matmul_compute
 
 compute_time_per_step = sum(compute_cost for each op)
 ```

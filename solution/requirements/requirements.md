@@ -70,8 +70,8 @@ compute time vs. memory transfer time, and subgraphs execute strictly serially.
   select the value that minimises total subgraph latency while keeping the working set within
   `fast_memory_capacity`. Using only `k = 1` is pathologically bad: it produces `K_full`
   k-steps each loading tiny strips (`h*1 + 1*w` elements), multiplying memory traffic by
-  `K_full` compared to a larger `k`. The search must prefer larger `k` values (fewer, heavier
-  steps) unless they violate the OOM constraint.
+  `K_full` compared to a larger `k`. When multiple `k` values produce equal latency, larger
+  `k` is preferred as a tie-breaker.
 
 ### Working-Set Constraint
 
