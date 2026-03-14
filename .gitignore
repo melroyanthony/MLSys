@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+build/
+.npm/
+.npmrc
+*.tsbuildinfo
+.turbo/
+.vercel/
+.cache/
+
+# Package managers
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+uv.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-*
+.project
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage/
+*.cover
+*.lcov
+
+# Testing
+.tox/
+.nox/
+.hypothesis/
+.pytest_cache/
+
+# Rust
+target/
+Cargo.lock
+
+# Claude Code config
+.claude/
+CLAUDE.md
+
+# Secrets (never commit)
+*.pem
+*.key
+secrets/
+credentials.json
