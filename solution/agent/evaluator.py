@@ -401,7 +401,7 @@ def compute_subgraph_latency(
     - In split-K mode:
       - LHS tensors: loaded FULLY in first k-step, held resident
       - RHS tensors: streamed as k-strips per k-step
-      - Output accumulator: held resident, evicted only in last k-step of last spatial tile
+      - Output accumulator: held resident, evicted on last k-step of each spatial tile
     - In non-split-K mode (or pointwise):
       - LHS treated as row-strips for intra-subgraph reuse tracking
       - RHS treated as col-strips for intra-subgraph reuse tracking

@@ -63,7 +63,7 @@ sequenceDiagram
     S-->>G: ScheduleState (with split-K)
 
     G->>G: For each subgraph, generate (w, h, k) candidates
-    Note over G: k candidates: K_max down to 1 in powers of 2<br/>K_max = min(K_full across MatMuls in subgraph)
+    Note over G: k candidates: K_cap down to 1 in powers of 2<br/>K_cap = min(K_full across MatMuls in subgraph)
     G->>M: Check OOM for each candidate
     G->>L: Calculate total latency for each valid (w, h, k)
     L-->>G: candidate latencies (sum of per-step roofline)
@@ -135,7 +135,7 @@ flowchart LR
     S2[2. Greedy Fusion<br>Merge adjacent ops]
     S3[3. Retention pass 1<br>Keep tensors resident]
     S4[4. Split-K<br>Reduce k for OOM relief]
-    S5[5. Granularity Search<br>Optimize w,h,k per subgraph<br>k: K_max...1 in powers of 2]
+    S5[5. Granularity Search<br>Optimize w,h,k per subgraph<br>k: K_cap...1 in powers of 2]
     S6[6. Retention pass 2<br>Re-evaluate after granularity changes]
     S7[7. Emergency OOM Fix<br>Reduce granularity for any remaining OOM]
     S8[8. Final Latency<br>Recalculate all subgraph latencies]

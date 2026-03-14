@@ -158,7 +158,8 @@ pub fn search_best_granularity(
                     dag,
                 );
 
-                if lat < best_latency {
+                // Prefer lower latency; tie-break with larger k (fewer k-steps)
+                if lat < best_latency || (lat == best_latency && trial.k > best_gran.k) {
                     best_latency = lat;
                     best_gran = trial;
                 }

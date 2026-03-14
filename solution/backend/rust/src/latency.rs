@@ -14,30 +14,6 @@ use crate::dag::DagInfo;
 use crate::models::{Granularity, Problem};
 use crate::parser::k_full_for_matmul;
 
-/// Find the K_full of the boundary output MatMul for a subgraph, if any.
-/// Returns None if there is no boundary-output MatMul (e.g., final op is Pointwise).
-pub fn find_boundary_matmul_k_full(
-    subgraph_ops: &[usize],
-    problem: &Problem,
-    dag: &DagInfo,
-) -> Option<i64> {
-    let op_set: HashSet<usize> = subgraph_ops.iter().copied().collect();
-    subgraph_ops.iter().find_map(|&op_idx| {
-        let op = &problem.ops[op_idx];
-        if !op.is_matmul() {
-            return None;
-        }
-        let out_t = op.outputs[0];
-        let is_boundary = dag.graph_outputs.contains(&out_t)
-            || dag.tensor_consumers[out_t].iter().any(|c| !op_set.contains(c));
-        if is_boundary {
-            Some(k_full_for_matmul(op, &problem.tensors))
-        } else {
-            None
-        }
-    })
-}
-
 /// Compute cost for MatMul ops only for one step of a subgraph.
 ///
 /// Each MatMul op is scaled by its own K_full:

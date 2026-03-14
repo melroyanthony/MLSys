@@ -224,10 +224,6 @@ For each execution step (one spatial tile, one k-step):
 
 #### Compute Time
 
-```
-compute_time_per_step = sum(op.base_cost for op in subgraph.ops)
-```
-
 **Hardware padding rule**: If `w < native_w` or `h < native_h`, the compute cost per step is unchanged (the hardware pads to native size, so you pay full cost but produce a smaller output tile). The cost is already accounted for by the increased number of spatial tiles. Specifically:
 
 - The `base_cost` is the cost for **one execution at native granularity**
@@ -248,8 +244,6 @@ For each k-step of a spatial tile:
       compute = matmul_compute + sum(op.base_cost for Pointwise ops)
   else:
       compute = matmul_compute
-
-compute_time_per_step = sum(compute_cost for each op)
 ```
 
 Where `K_full_for_this_op` is the inner/reduction dimension of that specific MatMul (the width of the LHS input = height of the RHS input... actually: for MatMul with inputs [LHS, RHS], `K_full = LHS.width = RHS.height`).
