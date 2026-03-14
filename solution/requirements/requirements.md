@@ -53,7 +53,9 @@ compute time vs. memory transfer time, and subgraphs execute strictly serially.
 ### Granularity Selection
 
 - **FR-010**: For each subgraph, choose a granularity `[w, h, k]` where `w` and `h` are
-  positive integers and `k` is a positive integer.
+  positive integers and `k` is a positive integer. The value of `k` must not be hardcoded to 1;
+  the optimizer must search over candidate `k` values to minimise subgraph latency (see
+  FR-013a).
 - **FR-011**: Enforce that `w` and `h` divide the output tensor dimensions without remainder,
   OR correctly model the hardware padding cost when `w` or `h` is smaller than
   `native_granularity` dimensions.
@@ -62,6 +64,14 @@ compute time vs. memory transfer time, and subgraphs execute strictly serially.
 - **FR-013**: Implement split-K: when `k` is less than the full reduction dimension of a
   MatMul, the scheduler must model output-stationary accumulation over multiple k-steps, with
   the accumulator held in fast memory between steps.
+- **FR-013a**: **k-dimension search for MatMul subgraphs (Issue #15 fix)**: For any subgraph
+  containing a MatMul op, the optimizer must search `k` from `K_full` (the full reduction
+  dimension) downward through powers of 2 (i.e., `K_full, K_full/2, K_full/4, …, 1`), and
+  select the value that minimises total subgraph latency while keeping the working set within
+  `fast_memory_capacity`. Using only `k = 1` is pathologically bad: it produces `K_full`
+  k-steps each loading tiny strips (`h*1 + 1*w` elements), multiplying memory traffic by
+  `K_full` compared to a larger `k`. The search must prefer larger `k` values (fewer, heavier
+  steps) unless they violate the OOM constraint.
 
 ### Working-Set Constraint
 
