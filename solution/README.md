@@ -338,11 +338,11 @@ Reported latencies are from Track A (Rust) on the local machine.
 
 | Benchmark | Ops | Tensors | Fast Mem | Bandwidth | Track A Latency |
 |-----------|-----|---------|----------|-----------|-----------------|
-| mlsys-2026-1  | 5   | 9   | 60,000   | 20  | 112,000   |
-| mlsys-2026-5  | 19  | 29  | 30,000   | 15  | 147,200   |
-| mlsys-2026-9  | 32  | 49  | 250,000  | 25  | 1,369,600 |
-| mlsys-2026-13 | 63  | 100 | 600,000  | 50  | 3,864,000 |
-| mlsys-2026-17 | 103 | 160 | 500,000  | 100 | 1,452,400 |
+| mlsys-2026-1  | 5   | 9   | 60,000   | 20  | 27,443    |
+| mlsys-2026-5  | 19  | 29  | 30,000   | 15  | 27,856    |
+| mlsys-2026-9  | 32  | 49  | 250,000  | 25  | 110,100   |
+| mlsys-2026-13 | 63  | 100 | 600,000  | 50  | 191,693   |
+| mlsys-2026-17 | 103 | 160 | 500,000  | 100 | 23,650    |
 
 All benchmarks complete in under 1 second. The optimizer fuses adjacent
 chains, applies Split-K for memory-constrained MatMuls, searches tile
