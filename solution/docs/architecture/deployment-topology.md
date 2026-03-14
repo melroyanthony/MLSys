@@ -123,7 +123,7 @@ solution/
             system.md
             examples.md
             strategies.md
-        pyproject.toml
+        requirements.txt            # google-genai>=1.0.0
 
 problem/
     PROBLEM.md

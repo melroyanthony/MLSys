@@ -77,6 +77,7 @@ Cargo.lock
 
 # Claude Code config
 .claude/
+CLAUDE.md
 
 # Secrets (never commit)
 *.pem
