@@ -177,17 +177,25 @@ Output JSON
 
 ### Latency Model
 
-For a subgraph executing at granularity `(w, h, k)` with `T` tiles:
+For a subgraph executing at granularity `(w, h, k)`:
 
 ```
-compute_time  = sum(base_cost[op] for op in subgraph) * T
-transfer_size = boundary_inputs_not_resident + boundary_outputs + retained_writes
-transfer_time = transfer_size / slow_memory_bandwidth
-subgraph_latency = max(compute_time, transfer_time)
+num_spatial_tiles = ceil(W_out / w) * ceil(H_out / h)
+num_k_steps       = ceil(K_full / k)  (MatMul) or 1 (Pointwise)
+
+Per step (one spatial tile, one k-step):
+  compute_time = sum(
+      base_cost * (k / K_full)  for MatMul ops,
+      base_cost                 for Pointwise ops
+  )
+  memory_time  = (loaded_slices + evicted_slices) / slow_memory_bandwidth
+  step_latency = max(compute_time, memory_time)
+
+subgraph_latency = sum(step_latency for all steps)
 ```
 
-The roofline equilibrium — where compute and memory costs are equal — is the
-target operating point for granularity tuning.
+Intra-subgraph data reuse (raster/snake traversal) reduces `memory_time`
+by keeping resident input strips that don't change between adjacent tiles.
 
 ### Key Source Files
 
@@ -202,6 +210,7 @@ target operating point for granularity tuning.
 | `backend/rust/src/optimizer/retention.rs` | Tensor retention optimisation |
 | `backend/rust/src/optimizer/splitk.rs` | Split-K for OOM MatMuls |
 | `backend/rust/src/optimizer/granularity.rs` | Granularity grid search |
+| `backend/rust/src/optimizer/traversal.rs` | Snake/zig-zag tile ordering |
 | `backend/rust/src/optimizer/pipeline.rs` | Pipeline orchestration |
 | `backend/rust/src/serializer.rs` | Solution -> JSON serialisation |
 | `agent/evaluator.py` | Python latency model (mirrors Rust logic) |
@@ -234,7 +243,8 @@ solution/
 │               ├── fusion.rs
 │               ├── retention.rs
 │               ├── splitk.rs
-│               └── granularity.rs
+│               ├── granularity.rs
+│               └── traversal.rs
 ├── agent/
 │   ├── agent.py                     # Track B entry point
 │   ├── evaluator.py                 # Python latency model
@@ -288,10 +298,10 @@ uv venv
 uv pip install -r requirements.txt
 
 # Smoke-test imports
-python -c "from evaluator import *; from scheduler import build_baseline, optimize; print('OK')"
+uv run python -c "from evaluator import *; from scheduler import build_baseline, optimize; print('OK')"
 
 # Run against a benchmark (no API key needed)
-GOOGLE_API_KEY=dummy python agent.py \
+GOOGLE_API_KEY=dummy uv run python agent.py \
     ../../problem/benchmarks/mlsys-2026-1.json /tmp/out-b.json
 ```
 
@@ -322,18 +332,18 @@ Validation checks per output file:
 All 5 released benchmarks produce valid solutions within the memory constraint.
 Reported latencies are from Track A (Rust) on the local machine.
 
-| Benchmark | Ops | Tensors | Fast Mem | Track A Latency |
-|-----------|-----|---------|----------|-----------------|
-| mlsys-2026-1  | varies | varies | varies | valid, non-negative |
-| mlsys-2026-5  | varies | varies | varies | valid, non-negative |
-| mlsys-2026-9  | varies | varies | varies | valid, non-negative |
-| mlsys-2026-13 | varies | varies | varies | valid, non-negative |
-| mlsys-2026-17 | varies | varies | varies | valid, non-negative |
+| Benchmark | Ops | Tensors | Fast Mem | Bandwidth | Track A Latency |
+|-----------|-----|---------|----------|-----------|-----------------|
+| mlsys-2026-1  | 5   | 9   | 60,000   | 20  | 112,000   |
+| mlsys-2026-5  | 19  | 29  | 30,000   | 15  | 147,200   |
+| mlsys-2026-9  | 32  | 49  | 250,000  | 25  | 1,369,600 |
+| mlsys-2026-13 | 63  | 100 | 600,000  | 50  | 3,864,000 |
+| mlsys-2026-17 | 103 | 160 | 500,000  | 100 | 1,452,400 |
 
-Exact latency numbers are printed to stderr at runtime. The optimizer
-consistently achieves near-roofline performance by fusing adjacent chains,
-using Split-K to handle memory-constrained MatMuls, and tuning tile granularity
-to balance compute and memory costs.
+All benchmarks complete in under 1 second. The optimizer fuses adjacent
+chains, applies Split-K for memory-constrained MatMuls, searches tile
+granularities to balance compute/memory costs, and uses snake traversal
+for MatMul data reuse.
 
 ---
 

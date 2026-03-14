@@ -69,6 +69,7 @@ coverage/
 .tox/
 .nox/
 .hypothesis/
+.pytest_cache/
 
 # Rust
 target/
