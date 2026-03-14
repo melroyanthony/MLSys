@@ -190,7 +190,7 @@ jobs:
 
           for b in 1 5 9 13 17; do
             OUT="$TMP_DIR/out-$b.json"
-            "$RUST_BIN" "$BENCH_DIR/mlsys-2026-$b.json" "$OUT" 2>/dev/null || true
+            "$RUST_BIN" "$BENCH_DIR/mlsys-2026-$b.json" "$OUT"
 
             python3 - <<'PYEOF' "$OUT" "$b"
           import json, sys
@@ -237,7 +237,7 @@ jobs:
 
           for b in 1 5 9 13 17; do
             OUT="$TMP_DIR/out-$b.json"
-            uv run python agent.py "$BENCH_DIR/mlsys-2026-$b.json" "$OUT" 2>/dev/null || true
+            uv run python agent.py "$BENCH_DIR/mlsys-2026-$b.json" "$OUT"
 
             python3 - <<'PYEOF' "$OUT" "$b"
           import json, sys
