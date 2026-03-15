@@ -330,8 +330,8 @@ pub fn subgraph_latency(
         }
     }
 
-    // Closed-form latency for raster order (traversal_order == None).
-    // This replaces the O(tiles * k_steps) simulation loop with O(1) algebra.
+    // Closed-form raster-order latency. Custom traversal orders (snake) use
+    // the tile-by-tile simulation in optimizer/traversal.rs::latency_with_traversal.
     if num_k_steps > 1 {
         // Split-K mode: all spatial tiles are identical.
         //

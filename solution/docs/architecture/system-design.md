@@ -171,14 +171,14 @@ The fusion stage merges adjacent subgraphs greedily in topological order. Before
 **Cost-based merge criterion (Issue #16):**
 
 Before merging subgraph A and subgraph B, compute:
-1. `latency_split = latency(A, best_gran_A) + latency(B, best_gran_B) + DRAM_boundary_cost`
+1. `latency_split = latency(A, best_gran_A) + latency(B, best_gran_B)`
 2. `latency_fused = latency(A+B, best_gran_fused)`
 
-Where `DRAM_boundary_cost` is the cost of evicting A's output to slow memory and reloading it as B's input: `2 * output_size / slow_memory_bandwidth`. This accounts for the round-trip through slow memory at the subgraph boundary.
+Note: `latency(A)` already includes evicting boundary outputs to DRAM, and `latency(B)` already includes loading them as boundary inputs. No separate DRAM boundary cost is added (that would double-count).
 
 **Merge only if `latency_fused < latency_split`.**
 
-This prevents harmful fusions where forcing a shared granularity on a larger working set degrades overall latency more than the boundary cost savings.
+This prevents harmful fusions where forcing a shared granularity degrades latency more than the DRAM savings from making intermediates ephemeral.
 
 ### Stage 7: Granularity Search -- Full (w, h, k) Search
 

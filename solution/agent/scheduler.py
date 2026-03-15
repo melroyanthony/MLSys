@@ -197,39 +197,6 @@ def _find_safe_granularity(
 
 
 # ---------------------------------------------------------------------------
-# DRAM boundary cost helper
-# ---------------------------------------------------------------------------
-
-
-def _boundary_dram_cost(
-    ops_a: list[int],
-    ops_b: list[int],
-    problem: Problem,
-) -> float:
-    """
-    Compute the DRAM round-trip cost for tensors at the boundary between
-    two adjacent subgraphs.
-
-    Boundary tensors are those produced by ops_a and consumed by ops_b.
-    Each must be fully materialized in DRAM (write from A + read into B),
-    so cost = 2 * full_tensor_size / bandwidth.
-    """
-    produced_by_a: set[int] = set()
-    for op_idx in ops_a:
-        produced_by_a.update(problem.ops[op_idx].outputs)
-
-    consumed_by_b: set[int] = set()
-    for op_idx in ops_b:
-        consumed_by_b.update(problem.ops[op_idx].inputs)
-
-    boundary = produced_by_a & consumed_by_b
-    bw = problem.slow_memory_bandwidth
-
-    cost = 0.0
-    for t_idx in boundary:
-        t = problem.tensors[t_idx]
-        cost += 2.0 * (t.width * t.height) / bw
-    return cost
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +228,7 @@ def optimize(problem: Problem) -> Solution:
     # ------------------------------------------------------------------ #
     # We merge sg[i] and sg[i+1] if:
     #   1. The merged subgraph fits in memory (with some valid granularity).
-    #   2. lat_fused < lat_a + lat_b + dram_boundary_cost
+    #   2. lat_fused < lat_a + lat_b (boundary DRAM already in lat_a/lat_b)
     changed = True
     while changed:
         changed = False
