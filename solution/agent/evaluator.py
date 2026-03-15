@@ -307,7 +307,7 @@ def _categorize_inputs(
                     seen.add(t)
                     pw_inputs.add(t)
 
-    return lhs_inputs, rhs_streamed, pw_inputs
+    return full_load_lhs, k_strip_lhs, rhs_streamed, pw_inputs
 
 
 # ---------------------------------------------------------------------------
@@ -362,19 +362,23 @@ def compute_working_set(
     for t_idx in retained_tensors:
         ws += problem.tensors[t_idx].size
 
-    # Categorize boundary inputs
-    lhs_inputs, rhs_streamed, pw_inputs = _categorize_inputs(
+    # Categorize boundary inputs (4-tuple matching build_memory_plan)
+    full_load_lhs, k_strip_lhs, rhs_streamed, pw_inputs = _categorize_inputs(
         subgraph_ops, problem, boundary_inputs, is_split_k
     )
 
-    # LHS of MatMul: loaded as row-strip (h × K_full) per spatial tile, resident
-    # across k-steps. K_full is the LHS tensor's width.
-    for t_idx in lhs_inputs:
+    # full_load LHS (ephemeral-output MatMul): h × K_full, resident across k-steps
+    for t_idx in full_load_lhs:
         if t_idx in retained_tensors:
             continue
-        # Find the K_full for this LHS tensor
         k_full_for_lhs = problem.tensors[t_idx].width
         ws += h * k_full_for_lhs
+
+    # k_strip LHS (non-ephemeral-output MatMul): h × k per k-step
+    for t_idx in k_strip_lhs:
+        if t_idx in retained_tensors:
+            continue
+        ws += h * k
 
     # RHS of MatMul: streamed as k-strips (k × w elements per k-step)
     for t_idx in rhs_streamed:
