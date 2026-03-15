@@ -25,6 +25,7 @@ from evaluator import (
     get_graph_inputs,
     get_graph_outputs,
     topological_sort,
+    _boundary_outputs_for_subgraph,
     _get_problem_info,
     _k_full_for_op,
     _output_tensor_for_subgraph,
@@ -274,15 +275,7 @@ def optimize(problem: Problem) -> Solution:
                     continue
 
                 # Boundary output dimension consistency
-                op_set = set(merged)
-                produced = set()
-                for o in merged:
-                    produced.update(problem.ops[o].outputs)
-                tensor_consumers, graph_outs = _get_problem_info(problem)
-                boundary_outs = [t for t in produced
-                                 if t in graph_outs
-                                 or any(c not in op_set
-                                        for c in tensor_consumers.get(t, []))]
+                boundary_outs = list(_boundary_outputs_for_subgraph(merged, problem))
                 if boundary_outs:
                     dims = [(problem.tensors[t].width, problem.tensors[t].height)
                             for t in boundary_outs]

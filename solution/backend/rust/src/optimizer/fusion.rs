@@ -33,7 +33,9 @@ pub fn greedy_fusion(
     // Entry is (best_granularity, best_latency). Invalidated on merge.
     // Also cache rejected merges to avoid re-evaluating unchanged pairs.
     let retained_before: HashSet<usize> = HashSet::new();
-    let mut rejected_merges: HashSet<(Vec<usize>, Vec<usize>)> = HashSet::new();
+    // Cache rejected merges using lightweight keys (first op of each group)
+    // to avoid cloning full Vec<usize> for every pair.
+    let mut rejected_merges: HashSet<(usize, usize)> = HashSet::new();
     let mut cache: Vec<Option<(Granularity, f64)>> = groups
         .iter()
         .map(|ops| {
@@ -53,8 +55,8 @@ pub fn greedy_fusion(
 
         while i < groups.len() {
             if i + 1 < groups.len() {
-                // Skip previously rejected pairs that haven't changed.
-                let merge_key = (groups[i].clone(), groups[i + 1].clone());
+                // Skip previously rejected pairs (keyed by first op of each group).
+                let merge_key = (groups[i][0], groups[i + 1][0]);
                 if rejected_merges.contains(&merge_key) {
                     new_groups.push(groups[i].clone());
                     new_cache.push(cache[i].take());
