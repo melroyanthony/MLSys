@@ -212,6 +212,26 @@ def _classify_tensors(
     return produced_inside, consumed_inside, ephemeral
 
 
+def _boundary_outputs_for_subgraph(
+    subgraph_ops: list[int], problem: Problem
+) -> set[int]:
+    """
+    Boundary outputs: tensors produced inside the subgraph that are either
+    graph outputs OR consumed by ops outside the subgraph. Includes fan-out
+    (tensors consumed both inside and outside).
+    """
+    op_set = set(subgraph_ops)
+    tensor_consumers, graph_outs = _get_problem_info(problem)
+    result: set[int] = set()
+    for op_idx in subgraph_ops:
+        for t in problem.ops[op_idx].outputs:
+            if t in graph_outs:
+                result.add(t)
+            elif any(c not in op_set for c in tensor_consumers.get(t, [])):
+                result.add(t)
+    return result
+
+
 def _k_full_for_op(op: Op, problem: Problem) -> int:
     """The full reduction dimension (K) for a MatMul op."""
     lhs_idx = op.inputs[0]
@@ -227,8 +247,7 @@ def _output_tensor_for_subgraph(
     The 'canonical' output tensor of a subgraph for spatial tiling.
     This is the final boundary output tensor.
     """
-    produced_inside, consumed_inside, _ = _classify_tensors(subgraph_ops, problem)
-    boundary_outputs = produced_inside - consumed_inside
+    boundary_outputs = _boundary_outputs_for_subgraph(subgraph_ops, problem)
 
     if not boundary_outputs:
         last_op = problem.ops[subgraph_ops[-1]]
@@ -243,48 +262,93 @@ def _output_tensor_for_subgraph(
 # ---------------------------------------------------------------------------
 
 
+def _precompute_problem_info(problem: Problem) -> tuple[dict[int, list[int]], set[int]]:
+    """Precompute tensor_consumers and graph_outputs for a Problem. Cache-friendly."""
+    tensor_consumers: dict[int, list[int]] = {}
+    for i, op in enumerate(problem.ops):
+        for t in op.inputs:
+            tensor_consumers.setdefault(t, []).append(i)
+    graph_outs = get_graph_outputs(problem)
+    return tensor_consumers, graph_outs
+
+
+# Single-entry cache: stores (problem_ref, info) for the last Problem seen.
+# Safe against id-reuse because we compare identity, not id().
+_cached_problem: list = [None, None]  # [problem_object, (tensor_consumers, graph_outputs)]
+
+
+def _get_problem_info(problem: Problem) -> tuple[dict[int, list[int]], set[int]]:
+    if _cached_problem[0] is not problem:
+        _cached_problem[0] = problem
+        _cached_problem[1] = _precompute_problem_info(problem)
+    return _cached_problem[1]
+
+
 def _categorize_inputs(
     subgraph_ops: list[int],
     problem: Problem,
     boundary_inputs: set[int],
-    is_split_k: bool,
-) -> tuple[set[int], set[int], set[int]]:
+) -> tuple[set[int], set[int], set[int], set[int], set[int]]:
     """
-    Categorize boundary inputs into:
-    - lhs_inputs: MatMul LHS tensors. These are loaded as row-strips
-      (h × K_full elements) per spatial tile and reused across k-steps.
-      In non-split-K (k==K_full), this is the full row-strip per tile.
-    - rhs_streamed_inputs: MatMul RHS tensors that are streamed as
-      k-strips (k × w elements) per k-step.
-    - pw_inputs: Pointwise inputs (loaded as w×h slices per spatial tile).
+    Categorize boundary inputs into (matching Rust build_memory_plan):
+    - full_load_lhs: MatMul LHS with ephemeral output — loaded as row-strips
+      (h × K_full). In split-K: loaded once per tile (reused across k-steps within
+      tile, NOT across tiles). In spatial-only: loaded once per tile-row (reused
+      across columns in same row).
+    - k_strip_lhs: MatMul LHS with non-ephemeral output — loaded as k-strips
+      (h × k) every k-step.
+    - rhs_standard: MatMul RHS with non-ephemeral output (k × w per k-step).
+    - rhs_ephemeral: MatMul RHS with ephemeral output (rhs.height × k per k-step,
+      where rhs.height = upstream K_full).
+    - pw_inputs: Pointwise inputs (w × h per spatial tile).
 
-    Key insight from Example 4A (non-split-K):
-      LHS row-strip = h × K_full loaded per spatial-tile-row (reused across cols).
-      RHS col-strip = K_full × w loaded per spatial-tile-col (reused across rows).
-
-    Key insight from Example 5B (split-K):
-      LHS loaded at h × K_full(op) = 128×128 per spatial tile (once, resident).
-      RHS streamed at k × w per k-step.
+    The key distinction: ephemeral-output MatMul LHS goes to full_load (row-reusable),
+    non-ephemeral-output MatMul LHS goes to k_strip (reloaded each k-step).
     """
-    lhs_inputs: set[int] = set()
-    rhs_streamed: set[int] = set()
+    op_set = set(subgraph_ops)
+    full_load_lhs: set[int] = set()
+    k_strip_lhs: set[int] = set()
+    rhs_standard: set[int] = set()
+    rhs_ephemeral: set[int] = set()
     pw_inputs: set[int] = set()
+    seen: set[int] = set()
+
+    tensor_consumers, graph_outs = _get_problem_info(problem)
 
     for op_idx in subgraph_ops:
         op = problem.ops[op_idx]
         if op.op_type == "MatMul":
             lhs_idx = op.inputs[0]
             rhs_idx = op.inputs[1]
-            if lhs_idx in boundary_inputs:
-                lhs_inputs.add(lhs_idx)
-            if rhs_idx in boundary_inputs:
-                rhs_streamed.add(rhs_idx)
+            out_t = op.outputs[0]
+
+            # Is output ephemeral? (has consumers, all within subgraph, not a graph output)
+            consumers = tensor_consumers.get(out_t, [])
+            output_ephemeral = (
+                len(consumers) > 0
+                and out_t not in graph_outs
+                and all(c in op_set for c in consumers)
+            )
+
+            if lhs_idx in boundary_inputs and lhs_idx not in seen:
+                seen.add(lhs_idx)
+                if output_ephemeral:
+                    full_load_lhs.add(lhs_idx)  # h * K_full, row-reusable
+                else:
+                    k_strip_lhs.add(lhs_idx)     # h * k, per k-step
+            if rhs_idx in boundary_inputs and rhs_idx not in seen:
+                seen.add(rhs_idx)
+                if output_ephemeral:
+                    rhs_ephemeral.add(rhs_idx)  # rhs.height * k
+                else:
+                    rhs_standard.add(rhs_idx)   # k * w
         else:  # Pointwise
             for t in op.inputs:
-                if t in boundary_inputs:
+                if t in boundary_inputs and t not in seen:
+                    seen.add(t)
                     pw_inputs.add(t)
 
-    return lhs_inputs, rhs_streamed, pw_inputs
+    return full_load_lhs, k_strip_lhs, rhs_standard, rhs_ephemeral, pw_inputs
 
 
 # ---------------------------------------------------------------------------
@@ -305,20 +369,24 @@ def compute_working_set(
     - Ephemeral tensors: 0 capacity
     - Retained tensors from previous subgraphs: full size
     - In split-K mode (num_k_steps > 1):
-      - LHS of MatMul (boundary input): FULL tensor size (loaded once, resident)
-      - RHS of MatMul (boundary input): k × w per k-step (streamed)
+      - full_load LHS (ephemeral-output MatMul): h × K_full row-strip per tile
+      - k_strip LHS (non-ephemeral-output MatMul): h × k per k-step
+      - Standard RHS: k × w per k-step
+      - Ephemeral-output RHS: rhs.height × k per k-step
       - Output accumulator: w × h (resident across k-steps)
       - Pointwise inputs: w × h per spatial tile
     - In non-split-K mode (num_k_steps == 1):
-      - MatMul LHS: h × k (= h × K_full) per tile
-      - MatMul RHS: k × w (= K_full × w) per tile
+      - full_load LHS: h × K_full row-strip, row-reusable
+      - k_strip LHS: h × k, row-reusable
+      - Standard RHS: k × w per column
+      - Ephemeral-output RHS: rhs.height × k per column
       - Output: w × h
     """
     w, h, k = gran.w, gran.h, gran.k
 
     produced_inside, consumed_inside, ephemeral = _classify_tensors(subgraph_ops, problem)
     boundary_inputs = consumed_inside - produced_inside
-    boundary_outputs = produced_inside - consumed_inside
+    boundary_outputs = _boundary_outputs_for_subgraph(subgraph_ops, problem)
 
     # Determine whether this is a split-K scenario.
     # Use min(K_full) across all MatMuls, consistent with compute_subgraph_latency().
@@ -339,25 +407,35 @@ def compute_working_set(
     for t_idx in retained_tensors:
         ws += problem.tensors[t_idx].size
 
-    # Categorize boundary inputs
-    lhs_inputs, rhs_streamed, pw_inputs = _categorize_inputs(
-        subgraph_ops, problem, boundary_inputs, is_split_k
+    # Categorize boundary inputs (5-tuple matching build_memory_plan)
+    full_load_lhs, k_strip_lhs, rhs_standard, rhs_ephemeral, pw_inputs = _categorize_inputs(
+        subgraph_ops, problem, boundary_inputs
     )
 
-    # LHS of MatMul: loaded as row-strip (h × K_full) per spatial tile, resident
-    # across k-steps. K_full is the LHS tensor's width.
-    for t_idx in lhs_inputs:
+    # full_load LHS (ephemeral-output MatMul): h × K_full, resident across k-steps
+    for t_idx in full_load_lhs:
         if t_idx in retained_tensors:
             continue
-        # Find the K_full for this LHS tensor
         k_full_for_lhs = problem.tensors[t_idx].width
         ws += h * k_full_for_lhs
 
-    # RHS of MatMul: streamed as k-strips (k × w elements per k-step)
-    for t_idx in rhs_streamed:
+    # k_strip LHS (non-ephemeral-output MatMul): h × k per k-step
+    for t_idx in k_strip_lhs:
+        if t_idx in retained_tensors:
+            continue
+        ws += h * k
+
+    # Standard RHS (non-ephemeral output): k × w per k-step
+    for t_idx in rhs_standard:
         if t_idx in retained_tensors:
             continue
         ws += k * w
+
+    # Ephemeral-output RHS: rhs.height × k per k-step
+    for t_idx in rhs_ephemeral:
+        if t_idx in retained_tensors:
+            continue
+        ws += problem.tensors[t_idx].height * k
 
     # Pointwise inputs: w × h per spatial tile
     for t_idx in pw_inputs:
@@ -403,19 +481,20 @@ def compute_subgraph_latency(
     - retained_tensors: already in fast memory at full size; no load cost
     - tensors_to_retain_after: outputs that are RETAINED (not evicted) after this
       subgraph. These tensors do NOT incur mem_out cost.
-    - In split-K mode:
-      - LHS tensors: loaded FULLY in first k-step, held resident
-      - RHS tensors: streamed as k-strips per k-step
-      - Output accumulator: held resident, evicted on last k-step of each spatial tile
-    - In non-split-K mode (or pointwise):
-      - LHS treated as row-strips for intra-subgraph reuse tracking
-      - RHS treated as col-strips for intra-subgraph reuse tracking
+    - In split-K mode (num_k_steps > 1):
+      - full_load LHS (ephemeral-output MatMul): h × K_full row-strip, loaded once per tile
+      - k_strip LHS (non-ephemeral-output MatMul): h × k, loaded every k-step
+      - Standard RHS: k × w per k-step; Ephemeral-output RHS: rhs.height × k per k-step
+      - Output accumulator: w × h, evicted on last k-step of each spatial tile
+    - In spatial-only mode (num_k_steps == 1):
+      - full_load + k_strip LHS: row-reusable (loaded on first column of each row)
+      - RHS: loaded per column (col-reuse in snake traversal)
     """
     if tensors_to_retain_after is None:
         tensors_to_retain_after = set()
     produced_inside, consumed_inside, ephemeral = _classify_tensors(subgraph_ops, problem)
     boundary_inputs = consumed_inside - produced_inside
-    boundary_outputs = produced_inside - consumed_inside
+    boundary_outputs = _boundary_outputs_for_subgraph(subgraph_ops, problem)
 
     # Spatial tiling
     out_tensor = _output_tensor_for_subgraph(subgraph_ops, problem)
@@ -443,9 +522,6 @@ def compute_subgraph_latency(
 
     is_split_k = num_k_steps > 1
 
-    # Build traversal sequence
-    tile_sequence = traversal_order if traversal_order is not None else list(range(num_spatial_tiles))
-
     # Split compute: MatMul cost paid every k-step; Pointwise cost only on last k-step.
     matmul_compute_per_step = 0.0
     pointwise_compute = 0.0
@@ -457,19 +533,117 @@ def compute_subgraph_latency(
         else:
             pointwise_compute += op.base_cost
 
-    # Categorize boundary inputs
-    lhs_inputs, rhs_streamed_inputs, pw_inputs = _categorize_inputs(
-        subgraph_ops, problem, boundary_inputs, is_split_k
+    # Categorize boundary inputs (5-tuple matching Rust build_memory_plan)
+    full_load_lhs, k_strip_lhs, rhs_standard, rhs_ephemeral, pw_inputs = _categorize_inputs(
+        subgraph_ops, problem, boundary_inputs
     )
 
     bw = problem.slow_memory_bandwidth
+
+    # Pre-compute memory totals needed for both the fast path and the simulation path.
+
+    # full_load LHS (ephemeral-output MatMul): h * K_full, row-reusable.
+    full_load_lhs_time = sum(
+        (h * problem.tensors[t_idx].width) / bw
+        for t_idx in full_load_lhs
+        if t_idx not in retained_tensors
+    )
+
+    # k_strip LHS (non-ephemeral-output MatMul): h * k, per k-step.
+    k_strip_lhs_per_step = sum(
+        (h * k) / bw
+        for t_idx in k_strip_lhs
+        if t_idx not in retained_tensors
+    )
+
+    # Standard RHS: k * w per k-step.
+    rhs_std_per_step = sum(
+        (k * w) / bw
+        for t_idx in rhs_standard
+        if t_idx not in retained_tensors
+    )
+
+    # Ephemeral-output RHS: rhs.height * k per k-step (rhs.height = upstream K_full).
+    rhs_eph_per_step = sum(
+        (problem.tensors[t_idx].height * k) / bw
+        for t_idx in rhs_ephemeral
+        if t_idx not in retained_tensors
+    )
+
+    # Total k_strip load per step (k_strip LHS + both RHS types)
+    k_strip_total_per_step = k_strip_lhs_per_step + rhs_std_per_step + rhs_eph_per_step
+
+    # Pointwise inputs: w * h per spatial tile (first k-step).
+    pw_load_per_tile = sum(
+        (w * h) / bw
+        for t_idx in pw_inputs
+        if t_idx not in retained_tensors
+    )
+
+    # Output eviction: w * h per spatial tile (last k-step), for non-retained outputs.
+    out_evict_per_tile = sum(
+        (w * h) / bw
+        for t_idx in boundary_outputs
+        if t_idx not in tensors_to_retain_after
+    )
+
+    # ------------------------------------------------------------------
+    # Fast path: closed-form for raster order (traversal_order is None).
+    # ------------------------------------------------------------------
+    if traversal_order is None:
+        if is_split_k:
+            # Split-K mode: all spatial tiles are identical (no row-reuse).
+            # full_load LHS loaded once per tile. k_strip LHS + RHS loaded every k-step.
+            # First k-step: full_load + pw_load + k_strip_total
+            first_k_mem = full_load_lhs_time + pw_load_per_tile + k_strip_total_per_step
+            first_k_lat = max(matmul_compute_per_step, first_k_mem)
+
+            # Interior k-steps: k_strip_total only
+            if num_k_steps > 2:
+                interior_k_lat = max(matmul_compute_per_step, k_strip_total_per_step)
+            else:
+                interior_k_lat = 0.0
+
+            # Last k-step: k_strip_total + eviction, compute includes PW
+            last_k_mem = k_strip_total_per_step + out_evict_per_tile
+            last_k_lat = max(matmul_compute_per_step + pointwise_compute, last_k_mem)
+
+            per_tile_lat = first_k_lat + max(0, num_k_steps - 2) * interior_k_lat + last_k_lat
+            return num_spatial_tiles * per_tile_lat
+
+        else:
+            # Spatial-only mode (num_k_steps == 1): row-reuse pattern.
+            # full_load LHS + k_strip LHS are row-reusable (first column only).
+            # RHS (standard + ephemeral) loaded per column.
+            compute = matmul_compute_per_step + pointwise_compute
+
+            # Per-column RHS load (not row-reusable)
+            rhs_per_col = rhs_std_per_step + rhs_eph_per_step
+
+            first_col_mem = (full_load_lhs_time + k_strip_lhs_per_step
+                             + rhs_per_col + pw_load_per_tile + out_evict_per_tile)
+            first_col_lat = max(compute, first_col_mem)
+
+            other_col_mem = rhs_per_col + pw_load_per_tile + out_evict_per_tile
+            other_col_lat = max(compute, other_col_mem)
+
+            return num_tiles_h * (first_col_lat + max(0, num_tiles_w - 1) * other_col_lat)
+
+    # ------------------------------------------------------------------
+    # Simulation path: custom traversal order (e.g. snake).
+    # Tracks actual row/col residency for data-reuse accounting.
+    # ------------------------------------------------------------------
+    tile_sequence = traversal_order
+
     total_latency = 0.0
 
     # Track intra-subgraph residency for row/col strips.
-    # For LHS: resident_lhs[t_idx] = tile_row that is currently loaded (-1 = none)
-    # For RHS (non-split-K): resident_rhs[t_idx] = tile_col currently loaded (-1 = none)
-    resident_lhs: dict[int, int] = {t: -1 for t in lhs_inputs}
-    resident_rhs: dict[int, int] = {t: -1 for t in rhs_streamed_inputs}
+    # full_load_lhs: row-reusable (resident across columns in same row)
+    # k_strip_lhs: loaded every k-step (no row-reuse)
+    resident_full_lhs: dict[int, int] = {t: -1 for t in full_load_lhs}
+    resident_k_strip_lhs: dict[int, int] = {t: -1 for t in k_strip_lhs}
+    all_rhs = rhs_standard | rhs_ephemeral
+    resident_rhs: dict[int, int] = {t: -1 for t in all_rhs}
 
     for spatial_step, tile_flat_idx in enumerate(tile_sequence):
         tile_row = tile_flat_idx // num_tiles_w
@@ -482,41 +656,50 @@ def compute_subgraph_latency(
             mem_in = 0.0
             mem_out = 0.0
 
-            # ------- LHS tensors -------
-            # LHS is loaded as a row-strip (h × K_full(op)) per spatial-tile-row.
-            # It is reused across:
-            #   - All k-steps for the same spatial tile (split-K reuse)
-            #   - Consecutive tiles in the same row (row reuse)
-            # Cost is incurred once per unique tile_row encountered.
+            # ------- full_load LHS (ephemeral-output MatMul, row-reusable) -------
             if is_first_k:
-                for t_idx in lhs_inputs:
+                for t_idx in full_load_lhs:
                     if t_idx in retained_tensors:
                         continue
-                    if resident_lhs[t_idx] != tile_row:
+                    if is_split_k or resident_full_lhs[t_idx] != tile_row:
                         k_full_lhs = problem.tensors[t_idx].width
                         mem_in += (h * k_full_lhs) / bw
-                        resident_lhs[t_idx] = tile_row
+                        resident_full_lhs[t_idx] = tile_row
+
+            # ------- k_strip LHS (non-ephemeral-output MatMul) -------
+            # In split-K: loaded every k-step (no reuse).
+            # In spatial-only: row-reusable (same as full_load).
+            for t_idx in k_strip_lhs:
+                if t_idx in retained_tensors:
+                    continue
+                if is_split_k:
+                    mem_in += (h * k) / bw
+                elif is_first_k and resident_k_strip_lhs[t_idx] != tile_row:
+                    mem_in += (h * k) / bw
+                    resident_k_strip_lhs[t_idx] = tile_row
 
             # ------- RHS tensors -------
             if is_split_k:
-                # Split-K: RHS streamed as k-strips per k-step (no col reuse between k-steps)
-                for t_idx in rhs_streamed_inputs:
+                for t_idx in all_rhs:
                     if t_idx in retained_tensors:
                         continue
-                    mem_in += (k * w) / bw
+                    if t_idx in rhs_ephemeral:
+                        mem_in += (problem.tensors[t_idx].height * k) / bw
+                    else:
+                        mem_in += (k * w) / bw
             else:
-                # Non-split-K: RHS as col-strips, with intra-subgraph col reuse.
-                # Col reuse: if previous tile was in the same column, RHS strip still resident.
                 if is_first_k:
-                    for t_idx in rhs_streamed_inputs:
+                    for t_idx in all_rhs:
                         if t_idx in retained_tensors:
                             continue
                         if resident_rhs[t_idx] != tile_col:
-                            mem_in += (k * w) / bw
+                            if t_idx in rhs_ephemeral:
+                                mem_in += (problem.tensors[t_idx].height * k) / bw
+                            else:
+                                mem_in += (k * w) / bw
                             resident_rhs[t_idx] = tile_col
 
             # ------- Pointwise inputs -------
-            # Loaded once per spatial tile (first k-step)
             if is_first_k:
                 for t_idx in pw_inputs:
                     if t_idx in retained_tensors:
@@ -524,19 +707,12 @@ def compute_subgraph_latency(
                     mem_in += (w * h) / bw
 
             # ------- Output eviction -------
-            # Non-retained outputs are evicted to slow memory.
-            # Retained outputs (tensors_to_retain_after) are NOT evicted.
-            # In split-K with spatial tiling: eviction at LAST k-step of EACH spatial tile
-            # (each spatial tile's accumulator is written out once it finishes all k-steps).
-            # In non-split-K: eviction at LAST k-step of EACH spatial tile.
             if is_last_k:
                 for t_idx in boundary_outputs:
                     if t_idx not in tensors_to_retain_after:
                         mem_out += (w * h) / bw
 
-            # Pointwise ops execute only on the last k-step of each spatial tile.
             compute_this_step = matmul_compute_per_step + (pointwise_compute if is_last_k else 0.0)
-
             memory_time = mem_in + mem_out
             step_latency = max(compute_this_step, memory_time)
             total_latency += step_latency

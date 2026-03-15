@@ -25,6 +25,7 @@ from evaluator import (
     get_graph_inputs,
     get_graph_outputs,
     topological_sort,
+    _boundary_outputs_for_subgraph,
     _k_full_for_op,
     _output_tensor_for_subgraph,
 )
@@ -191,9 +192,12 @@ def _find_safe_granularity(
                     if lat < best_latency:
                         best_latency = lat
                         best_gran = g
-                    break  # k_cands sorted largest first; first fit is best k
+                    # Don't break — smaller k may produce lower latency
 
     return best_gran
+
+
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -221,10 +225,33 @@ def optimize(problem: Problem) -> Solution:
     sg_ops: list[list[int]] = [[op_idx] for op_idx in topo_order]
 
     # ------------------------------------------------------------------ #
-    # Step 2: Greedy forward fusion                                        #
+    # Step 2: Greedy cost-based forward fusion                             #
     # ------------------------------------------------------------------ #
-    # We merge sg[i] and sg[i+1] if the merged subgraph fits in memory
-    # at native granularity (we relax granularity later).
+    # We merge sg[i] and sg[i+1] if:
+    #   1. The merged subgraph fits in memory (with some valid granularity).
+    #   2. lat_fused < lat_a + lat_b (boundary DRAM already in lat_a/lat_b)
+
+    def _cached_best(ops: list[int], cache: dict) -> tuple[Granularity, float]:
+        """Get cached (best_gran, latency) for a group, computing if absent."""
+        key = tuple(ops)
+        if key not in cache:
+            g = _find_safe_granularity(ops, problem, set())
+            if g is None:
+                # No feasible granularity found — use infinity latency so this
+                # group is never favoured in fusion cost comparisons.
+                matmuls = [o for o in ops if problem.ops[o].op_type == "MatMul"]
+                kf = _k_full_for_op(problem.ops[matmuls[0]], problem) if matmuls else 1
+                g = Granularity(native_w, native_h, kf)
+                if not check_oom(ops, g, problem, set()):
+                    cache[key] = (g, float("inf"))
+                    return cache[key]
+            lat = compute_subgraph_latency(ops, g, problem, set(), tensors_to_retain_after=set())
+            cache[key] = (g, lat)
+        return cache[key]
+
+    lat_cache: dict[tuple[int, ...], tuple[Granularity, float]] = {}
+    rejected_merges: set[tuple[tuple[int, ...], tuple[int, ...]]] = set()
+
     changed = True
     while changed:
         changed = False
@@ -232,32 +259,70 @@ def optimize(problem: Problem) -> Solution:
         i = 0
         while i < len(sg_ops):
             if i + 1 < len(sg_ops):
+                # Skip previously rejected pairs.
+                merge_key = (tuple(sg_ops[i]), tuple(sg_ops[i + 1]))
+                if merge_key in rejected_merges:
+                    new_sg_ops.append(sg_ops[i])
+                    i += 1
+                    continue
+
                 merged = sg_ops[i] + sg_ops[i + 1]
-                # Check with native granularity (conservative)
-                matmul_in_merged = [o for o in merged
-                                    if problem.ops[o].op_type == "MatMul"]
-                if matmul_in_merged:
-                    k_full = _k_full_for_op(
-                        problem.ops[matmul_in_merged[0]], problem
+
+                # K_full consistency: all MatMuls must share the same K_full
+                matmul_k_fulls = [
+                    _k_full_for_op(problem.ops[o], problem)
+                    for o in merged if problem.ops[o].op_type == "MatMul"
+                ]
+                if matmul_k_fulls and len(set(matmul_k_fulls)) > 1:
+                    rejected_merges.add(merge_key)
+                    new_sg_ops.append(sg_ops[i])
+                    i += 1
+                    continue
+
+                # Boundary output dimension consistency
+                boundary_outs = list(_boundary_outputs_for_subgraph(merged, problem))
+                if boundary_outs:
+                    dims = [(problem.tensors[t].width, problem.tensors[t].height)
+                            for t in boundary_outs]
+                    if len(set(dims)) > 1:
+                        rejected_merges.add(merge_key)
+                        new_sg_ops.append(sg_ops[i])
+                        i += 1
+                        continue
+
+                g_merged = _find_safe_granularity(merged, problem, set())
+                if g_merged is None:
+                    matmul_in_merged = [o for o in merged
+                                        if problem.ops[o].op_type == "MatMul"]
+                    if matmul_in_merged:
+                        k_full = _k_full_for_op(
+                            problem.ops[matmul_in_merged[0]], problem
+                        )
+                    else:
+                        k_full = 1
+                    g_native = Granularity(native_w, native_h, k_full)
+                    g_merged = _find_safe_k(merged, g_native, problem, set())
+
+                if g_merged is not None:
+                    lat_fused = compute_subgraph_latency(
+                        merged, g_merged, problem, set(), tensors_to_retain_after=set()
                     )
-                else:
-                    k_full = 1
-                g_native = Granularity(native_w, native_h, k_full)
+                    _, lat_a = _cached_best(sg_ops[i], lat_cache)
+                    _, lat_b = _cached_best(sg_ops[i + 1], lat_cache)
 
-                # Try full native first, then split-k
-                if check_oom(merged, g_native, problem):
-                    new_sg_ops.append(merged)
-                    i += 2
-                    changed = True
-                    continue
+                    # Only merge when fused is meaningfully better (relative tolerance).
+                    lat_split = lat_a + lat_b
+                    eps = max(1.0, abs(lat_split)) * 1e-9
+                    if lat_fused < lat_split - eps:
+                        new_sg_ops.append(merged)
+                        # Cache the merged result
+                        lat_cache[tuple(merged)] = (g_merged, lat_fused)
+                        i += 2
+                        changed = True
+                        continue
 
-                # Try with split-k
-                g_reduced = _find_safe_k(merged, g_native, problem, set())
-                if g_reduced is not None:
-                    new_sg_ops.append(merged)
-                    i += 2
-                    changed = True
-                    continue
+                # Cache as rejected so we don't re-evaluate.
+                rejected_merges.add(merge_key)
 
             new_sg_ops.append(sg_ops[i])
             i += 1

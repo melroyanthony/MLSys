@@ -1,13 +1,17 @@
-/// Greedy bottom-up chain fusion.
+/// Greedy cost-based chain fusion.
 ///
 /// Merges adjacent ops (in topological order) into subgraphs where the
-/// merged working set fits in fast memory (with any valid granularity).
+/// merged working set fits in fast memory AND fusing reduces total latency
+/// compared to executing the two subgraphs separately with a DRAM round-trip
+/// at their boundary.
 
 use std::collections::HashSet;
 
 use crate::dag::DagInfo;
+use crate::latency::subgraph_latency;
 use crate::memory::find_split_k;
 use crate::models::{Granularity, Problem, SubgraphDef};
+use crate::optimizer::granularity::search_best_granularity;
 use crate::parser::{k_full_for_matmul, native_granularity_for_subgraph};
 
 /// Attempt to fuse the subgraphs in topological order.
@@ -25,10 +29,24 @@ pub fn greedy_fusion(
 
     let mut groups: Vec<Vec<usize>> = subgraphs.iter().map(|sg| sg.ops.clone()).collect();
 
+    // Cache best latency per group to avoid redundant granularity searches.
+    // Entry is (best_granularity, best_latency). Invalidated on merge.
+    let retained_before: HashSet<usize> = HashSet::new();
+    let mut cache: Vec<Option<(Granularity, f64)>> = groups
+        .iter()
+        .map(|ops| {
+            let base = native_granularity_for_subgraph(ops, problem);
+            let gran = search_best_granularity(ops, &base, &[], &retained_before, problem, dag);
+            let lat = subgraph_latency(ops, &gran, &[], &retained_before, problem, dag);
+            Some((gran, lat))
+        })
+        .collect();
+
     let mut changed = true;
     while changed {
         changed = false;
         let mut new_groups: Vec<Vec<usize>> = Vec::new();
+        let mut new_cache: Vec<Option<(Granularity, f64)>> = Vec::new();
         let mut i = 0;
 
         while i < groups.len() {
@@ -39,10 +57,7 @@ pub fn greedy_fusion(
                     .copied()
                     .collect();
 
-                let retained_before: HashSet<usize> = HashSet::new();
-
-                // Structural validity: merged ops must have consistent boundary
-                // output dimensions for the shared granularity to be meaningful.
+                // Structural validity: consistent boundary output dimensions.
                 let boundary_outputs = dag.boundary_outputs(problem, &merged);
                 let dims_consistent = if boundary_outputs.is_empty() {
                     true
@@ -54,8 +69,7 @@ pub fn greedy_fusion(
                     })
                 };
 
-                // K_full consistency: all MatMuls in a merged subgraph must share
-                // the same K_full, since the subgraph has a single k-step loop.
+                // K_full consistency: all MatMuls must share the same K_full.
                 let matmul_k_fulls: Vec<i64> = merged.iter()
                     .filter(|&&op_idx| problem.ops[op_idx].is_matmul())
                     .map(|&op_idx| k_full_for_matmul(&problem.ops[op_idx], &problem.tensors))
@@ -63,30 +77,63 @@ pub fn greedy_fusion(
                 let k_full_consistent = matmul_k_fulls.is_empty()
                     || matmul_k_fulls.iter().all(|&kf| kf == matmul_k_fulls[0]);
 
-                if dims_consistent
-                    && k_full_consistent
-                    && find_feasible_granularity(&merged, &retained_before, problem, dag).is_some()
-                {
-                    new_groups.push(merged);
-                    i += 2;
-                    changed = true;
-                    continue;
+                if dims_consistent && k_full_consistent {
+                    if find_feasible_granularity(&merged, &retained_before, problem, dag).is_some()
+                    {
+                        let base_merged = native_granularity_for_subgraph(&merged, problem);
+                        let merged_gran = search_best_granularity(
+                            &merged, &base_merged, &[], &retained_before, problem, dag,
+                        );
+                        let lat_fused = subgraph_latency(
+                            &merged, &merged_gran, &[], &retained_before, problem, dag,
+                        );
+
+                        // Use cached latencies for individual groups.
+                        let lat_a = cache[i].as_ref().map(|(_, l)| *l).unwrap_or_else(|| {
+                            let base = native_granularity_for_subgraph(&groups[i], problem);
+                            let g = search_best_granularity(&groups[i], &base, &[], &retained_before, problem, dag);
+                            subgraph_latency(&groups[i], &g, &[], &retained_before, problem, dag)
+                        });
+                        let lat_b = cache[i + 1].as_ref().map(|(_, l)| *l).unwrap_or_else(|| {
+                            let base = native_granularity_for_subgraph(&groups[i + 1], problem);
+                            let g = search_best_granularity(&groups[i + 1], &base, &[], &retained_before, problem, dag);
+                            subgraph_latency(&groups[i + 1], &g, &[], &retained_before, problem, dag)
+                        });
+
+                        // Only merge when fused is meaningfully better (relative tolerance).
+                        let lat_split = lat_a + lat_b;
+                        let eps = 1.0_f64.max(lat_split.abs()) * 1e-9;
+                        if lat_fused < lat_split - eps {
+                            new_groups.push(merged);
+                            // Cache the merged group's result.
+                            new_cache.push(Some((merged_gran, lat_fused)));
+                            i += 2;
+                            changed = true;
+                            continue;
+                        }
+                    }
                 }
             }
             new_groups.push(groups[i].clone());
+            new_cache.push(cache[i].take());
             i += 1;
         }
 
         groups = new_groups;
+        cache = new_cache;
     }
 
-    // Convert groups back to SubgraphDef with the best feasible granularity
+    // Convert groups back to SubgraphDef, reusing cached best granularity.
     let mut result: Vec<SubgraphDef> = Vec::new();
-    let prev_retained: HashSet<usize> = HashSet::new();
 
-    for ops in &groups {
-        let gran = find_feasible_granularity(ops, &prev_retained, problem, dag)
-            .unwrap_or_else(|| native_granularity_for_subgraph(ops, problem));
+    for (i, ops) in groups.iter().enumerate() {
+        let gran = cache[i]
+            .as_ref()
+            .map(|(g, _)| g.clone())
+            .unwrap_or_else(|| {
+                find_feasible_granularity(ops, &retained_before, problem, dag)
+                    .unwrap_or_else(|| native_granularity_for_subgraph(ops, problem))
+            });
 
         result.push(SubgraphDef {
             ops: ops.clone(),
@@ -99,6 +146,7 @@ pub fn greedy_fusion(
 
     result
 }
+
 
 /// Find the smallest feasible granularity for a subgraph (any k that fits in memory).
 /// Tries native spatial granularity with decreasing k values.

@@ -7,7 +7,7 @@ This is a **computational optimization tool**, not a web service. It is a single
 ## Scale Estimates
 
 - Input size: 2 ops / 3 tensors (trivial) to 96 ops / 160 tensors (benchmark 17)
-- Runtime target: < 5 minutes per benchmark on a standard developer machine
+- Runtime target: < 2 seconds per benchmark on a standard developer machine
 - No concurrency, no network, no database
 - Memory: All data fits easily in RAM (< 1 MB input, < 10 MB working state)
 
@@ -28,10 +28,10 @@ src/
     evaluate.rs             # Standalone solution evaluator (evaluate subcommand)
     optimizer/
         mod.rs              # Module declarations
-        fusion.rs           # Greedy bottom-up chain fusion
+        fusion.rs           # Greedy bottom-up chain fusion (with cost-based merge check)
         retention.rs        # Tensor retention decision logic
         splitk.rs           # Split-K search for MatMul subgraphs
-        granularity.rs      # Granularity search (w, h, k candidates)
+        granularity.rs      # Granularity search (w, h, k candidates) with closed-form latency
         traversal.rs        # Traversal order optimization (snake/zig-zag)
         pipeline.rs         # Orchestrates all 9 optimizer stages in sequence
 ```
@@ -143,8 +143,8 @@ Input JSON
 [3. Baseline Schedule] --> one op per subgraph, native granularity,
     |                       no retention, no fusion
     v
-[4. Greedy Fusion] --> merge adjacent ops into subgraphs
-    |                   where working set fits in fast memory
+[4. Cost-Based Fusion] --> merge adjacent ops into subgraphs only
+    |                       when fused latency < lat_a + lat_b
     v
 [5. Tensor Retention] --> for each subgraph boundary, decide which
     |                      output tensors to retain in fast memory
@@ -154,7 +154,7 @@ Input JSON
     v
 [7. Granularity Search] --> for each subgraph, search candidate
     |                        (w, h, k) triples to minimize total
-    |                        subgraph latency (see below)
+    |                        subgraph latency using closed-form evaluation
     v
 [8. Latency Calculation] --> compute final subgraph_latencies
     |
@@ -163,6 +163,22 @@ Input JSON
 ```
 
 Each stage takes the current schedule and refines it. Stages 4-7 are the optimization core. The baseline (stage 3) guarantees a valid output even if all optimizers are disabled.
+
+### Stage 4: Cost-Based Fusion
+
+The fusion stage merges adjacent subgraphs greedily in topological order. Before PR #20, the merge decision was purely feasibility-based: merge if the combined working set fits in fast memory. This could produce suboptimal results when fusing two subgraphs forces a worse granularity on the combined subgraph than either would use independently.
+
+**Cost-based merge criterion (Issue #16):**
+
+Before merging subgraph A and subgraph B, compute:
+1. `latency_split = latency(A, best_gran_A) + latency(B, best_gran_B)`
+2. `latency_fused = latency(A+B, best_gran_fused)`
+
+Note: `latency(A)` already includes evicting boundary outputs to DRAM, and `latency(B)` already includes loading them as boundary inputs. No separate DRAM boundary cost is added (that would double-count).
+
+**Merge only if `latency_fused < latency_split`.**
+
+This prevents harmful fusions where forcing a shared granularity degrades latency more than the DRAM savings from making intermediates ephemeral.
 
 ### Stage 7: Granularity Search -- Full (w, h, k) Search
 
@@ -179,8 +195,8 @@ Where `K_cap = K_full` (the shared reduction dimension across all MatMuls in the
 
 **For each (w, h, k) candidate:**
 1. Compute the working set (input slices + output slices + retained tensors)
-2. If `working_set > fast_memory_capacity`, skip this candidate (OOM)
-3. Compute total subgraph latency = sum of per-step roofline costs across all `num_spatial_tiles * num_k_steps` steps
+2. If `working_set > fast_memory_capacity`, skip this candidate (OOM) -- **early termination**
+3. Compute total subgraph latency using **closed-form evaluation** (see below)
 4. Track the candidate with the lowest total latency
 
 **Why k must be searched (not fixed at 1):**
@@ -189,13 +205,45 @@ With k=1, each k-step loads minimal input strips (h*1 + 1*w elements for MatMul)
 
 The previous implementation always selected k=1 because it minimized the per-step working set. However, the correct objective is to minimize **total** subgraph latency (summed across all steps), which accounts for the multiplicative effect of k-step count on repeated data reloading.
 
+**Closed-form latency evaluation (Issue #16 / ADR-005):**
+
+Instead of iterating over every tile and k-step to sum per-step roofline costs (which is O(num_spatial_tiles * num_k_steps) per candidate), the search uses a closed-form calculation that exploits the regularity of raster-order traversal:
+
+```
+num_rows = ceil(H_out / h)
+num_cols = ceil(W_out / w)
+num_k_steps = ceil(K_full / k)
+```
+
+**Spatial-only** (num_k_steps == 1) — row-reuse applies:
+
+```
+first_col_latency = max(compute, (full_load + k_strip_lhs + rhs + pw + evict) / bw)
+other_col_latency = max(compute, (rhs + pw + evict) / bw)
+total_latency = num_rows * (first_col_latency + (num_cols - 1) * other_col_latency)
+```
+
+**Split-K** (num_k_steps > 1) — all tiles identical, no row-reuse:
+
+```
+first_k  = max(matmul_compute, (full_load + pw_load + k_strip) / bw)
+interior = max(matmul_compute, k_strip / bw)
+last_k   = max(matmul_compute + pw_compute, (k_strip + evict) / bw)
+per_tile = first_k + max(0, num_k_steps - 2) * interior + last_k
+total_latency = num_spatial_tiles * per_tile
+```
+
+For **Pointwise-only subgraphs** (num_k_steps = 1, no MatMul reuse patterns), the formula simplifies to `num_tiles * max(compute, memory)` since all tiles are identical.
+
+This reduces candidate evaluation from O(tiles * k_steps) to O(1), making the entire granularity search O(candidates) where candidates = O(log W * log H * log K_full).
+
 **Search complexity:** For a subgraph with output dimensions W x H and reduction K_full:
 - w candidates: O(log W)
 - h candidates: O(log H)
 - k candidates: O(log K_full)
 - Total: O(log W * log H * log K_full) candidates per subgraph
-- Each candidate evaluation is O(1)
-- Total search time remains well under 1 second for all benchmarks
+- Each candidate evaluation is O(1) via closed-form
+- Total search time remains well under 100 milliseconds for all benchmarks
 
 ---
 
@@ -449,8 +497,9 @@ total_latency = sum(subgraph_latency for each subgraph)
 ## Performance Considerations
 
 1. **Rust zero-cost abstractions**: The scheduler performs integer arithmetic, comparisons, and vector operations. Rust compiles to native code with no garbage collection pauses.
-2. **Granularity search space**: Candidates are powers of 2 for each dimension. For spatial dimensions, up to ~6 candidates per dimension for a 4096-wide tensor. For the k dimension, O(log2 K_full) candidates (e.g., 12 for K_full=4096). The full search space per subgraph is O(log W * log H * log K) candidates, each evaluated in O(1) time. See ADR-004 for details on the k-dimension search.
-3. **Fusion feasibility check**: Before merging two subgraphs, check working-set OOM at the most restrictive granularity. This is O(1) per candidate merge.
-4. **Topological sort**: Kahn's algorithm, O(V + E), runs once.
-5. **Total optimizer complexity**: O(N^2) for fusion (N = number of ops), O(G) for granularity search per subgraph (G = candidate granularities). Well within the contest time budget even for benchmark 17.
-6. **Static binary**: `cargo build --release` with `lto = true` and `codegen-units = 1` produces a fully optimized, statically linked binary with no runtime dependencies.
+2. **Closed-form granularity evaluation (ADR-005)**: Candidate (w, h, k) triples are evaluated using a closed-form latency formula instead of tile-by-tile simulation. This reduces per-candidate evaluation from O(tiles * k_steps) to O(1). The search space remains O(log W * log H * log K) candidates per subgraph, with each evaluation being a constant-time arithmetic expression. See ADR-005 for the derivation and correctness argument.
+3. **Early termination on OOM**: Before computing the closed-form latency for any candidate, the working set is checked against `fast_memory_capacity`. Infeasible candidates are pruned immediately, avoiding even the O(1) latency computation. For memory-constrained subgraphs, this eliminates the majority of the search space.
+4. **Cost-based fusion (Issue #16)**: Before merging two subgraphs, the optimizer compares `latency(fused, best_granularity)` against `latency(A, best_A) + latency(B, best_B)`. Individual latencies already include DRAM boundary transfers (eviction from A, loading into B), so no separate boundary cost is added. The cost comparison uses the same closed-form evaluator, so it adds negligible overhead.
+5. **Topological sort**: Kahn's algorithm, O(V + E), runs once.
+6. **Total optimizer complexity**: O(N^2) for fusion (N = number of ops, each candidate merge requires a cost comparison), O(G) for granularity search per subgraph (G = candidate granularities, each O(1)). All 5 benchmarks complete end-to-end in under 2 seconds.
+7. **Static binary**: `cargo build --release` with `lto = true` and `codegen-units = 1` produces a fully optimized, statically linked binary with no runtime dependencies.
