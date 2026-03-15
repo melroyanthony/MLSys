@@ -65,6 +65,6 @@ The closed-form computation must produce **exactly the same numerical result** a
 - Closed-form derivation requires careful accounting of edge cases (single-column subgraphs, single k-step, Pointwise-only subgraphs)
 
 ### Mitigations
-- Add a debug assertion that compares closed-form result against simulation result for each candidate during testing
+- Correctness validated via unit tests covering all 5 PROBLEM.md examples (both strategies) and fused MatMul+Pointwise split-K scenarios. The closed-form and simulation paths are cross-checked by running both tracks (Rust closed-form and Python) and comparing outputs
 - Pointwise-only subgraphs (k=1, no MatMul reuse patterns) use a simplified formula: `num_tiles * max(compute, memory)` since all tiles are identical
 - The closed-form replaces the simulation for all raster-order evaluation (both search and evaluate subcommand). Snake/custom traversal orders retain the tile-by-tile simulation since their memory pattern is non-uniform

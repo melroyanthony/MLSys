@@ -191,7 +191,7 @@ def _find_safe_granularity(
                     if lat < best_latency:
                         best_latency = lat
                         best_gran = g
-                    break  # k_cands sorted largest first; first fit is best k
+                    # Don't break — smaller k may produce lower latency
 
     return best_gran
 
