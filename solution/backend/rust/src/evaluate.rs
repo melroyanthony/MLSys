@@ -71,6 +71,26 @@ pub fn evaluate(problem: &Problem, solution: &Solution) -> Result<EvaluateResult
             }
         }
 
+        // Validate k <= min(K_full) for MatMul subgraphs
+        let min_k_full: Option<i64> = sg.ops.iter()
+            .filter_map(|&op_idx| {
+                let op = &problem.ops[op_idx];
+                if op.is_matmul() {
+                    Some(crate::parser::k_full_for_matmul(op, &problem.tensors))
+                } else {
+                    None
+                }
+            })
+            .min();
+        if let Some(kf) = min_k_full {
+            if sg.granularity.k > kf {
+                return Err(format!(
+                    "Subgraph {sg_idx}: granularity k={} exceeds min K_full={kf} across MatMul ops",
+                    sg.granularity.k
+                ));
+            }
+        }
+
         // OOM check
         if !check_oom(
             &sg.ops,
