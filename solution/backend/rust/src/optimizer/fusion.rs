@@ -33,14 +33,9 @@ pub fn greedy_fusion(
     // Entry is (best_granularity, best_latency). Invalidated on merge.
     // Also cache rejected merges to avoid re-evaluating unchanged pairs.
     let retained_before: HashSet<usize> = HashSet::new();
-    // Cache rejected merges using hash of ops slices (no cloning).
-    use std::hash::{Hash, Hasher};
-    fn hash_group(ops: &[usize]) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        ops.hash(&mut h);
-        h.finish()
-    }
-    let mut rejected_merges: HashSet<(u64, u64)> = HashSet::new();
+    // Cache rejected merges using Arc<[usize]> for cheap cloning + correct equality.
+    use std::sync::Arc;
+    let mut rejected_merges: HashSet<(Arc<[usize]>, Arc<[usize]>)> = HashSet::new();
     let mut cache: Vec<Option<(Granularity, f64)>> = groups
         .iter()
         .map(|ops| {
@@ -61,7 +56,8 @@ pub fn greedy_fusion(
         while i < groups.len() {
             if i + 1 < groups.len() {
                 // Skip previously rejected pairs (keyed by full ops content).
-                let merge_key = (hash_group(&groups[i]), hash_group(&groups[i + 1]));
+                let merge_key: (Arc<[usize]>, Arc<[usize]>) =
+                    (Arc::from(groups[i].as_slice()), Arc::from(groups[i + 1].as_slice()));
                 if rejected_merges.contains(&merge_key) {
                     new_groups.push(groups[i].clone());
                     new_cache.push(cache[i].take());
