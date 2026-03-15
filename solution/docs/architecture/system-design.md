@@ -215,23 +215,26 @@ num_cols = ceil(W_out / w)
 num_k_steps = ceil(K_full / k)
 
 # Per-tile latency by position type
-first_tile_latency = (num_k_steps - 1) * interior_k_step + last_k_step_first_tile
-subsequent_tile_latency = (num_k_steps - 1) * interior_k_step + last_k_step_subsequent_tile
+**Spatial-only** (num_k_steps == 1): Row-reuse applies.
 
-# Total
-total_latency = num_rows * (
-    first_tile_latency + (num_cols - 1) * subsequent_tile_latency
-)
+```
+# First tile of each row loads all inputs; subsequent tiles reuse LHS.
+first_col_latency = max(compute, (full_load + k_strip_lhs + rhs + pw + evict) / bw)
+other_col_latency = max(compute, (rhs + pw + evict) / bw)
+
+total_latency = num_rows * (first_col_latency + (num_cols - 1) * other_col_latency)
 ```
 
-Where:
-- **interior_k_step** (not last): `max(matmul_compute, memory_for_lhs_rhs_reload / bandwidth)` -- only MatMul input strips are loaded, no Pointwise compute, no output eviction
-- **last_k_step_first_tile**: `max(full_compute, memory_for_all_loads_plus_eviction / bandwidth)` -- includes Pointwise compute and output eviction; first tile in row loads all input strips fresh
-- **last_k_step_subsequent_tile**: same as above but LHS strip is reused from the previous tile in the same row (one fewer load)
+**Split-K mode** (num_k_steps > 1): All spatial tiles are identical (no row-reuse). Three distinct k-step types per tile:
 
-The first tile of each row must load all inputs fresh (LHS strip changes with each row). Subsequent tiles in the same row reuse the LHS strip. This distinction is what makes closed-form possible: all "first" tiles have identical cost, and all "subsequent" tiles have identical cost.
+```
+first_k  = max(matmul_compute, (full_load + pw_load + k_strip) / bw)
+interior = max(matmul_compute, k_strip / bw)
+last_k   = max(matmul_compute + pw_compute, (k_strip + evict) / bw)
 
-**Split-K mode** (num_k_steps > 1): All spatial tiles are identical — there is no row-reuse across tiles because the k-step loop occupies the full tile execution. The per-tile latency is computed as `first_k_lat + (num_k_steps - 2) * interior_k_lat + last_k_lat`, then multiplied by `num_spatial_tiles`. The row-reuse derivation above applies only to the **spatial-only** case (num_k_steps == 1).
+per_tile = first_k + max(0, num_k_steps - 2) * interior + last_k
+total_latency = num_spatial_tiles * per_tile
+```
 
 For **Pointwise-only subgraphs** (num_k_steps = 1, no MatMul reuse patterns), the formula simplifies to `num_tiles * max(compute, memory)` since all tiles are identical.
 
