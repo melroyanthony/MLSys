@@ -382,7 +382,7 @@ pub fn subgraph_latency(
     }
 }
 
-/// Wrapper that also handles pure pointwise subgraphs correctly.
+/// Compute boundary input slice sizes for a subgraph at a given granularity.
 pub fn boundary_input_slice_sizes(
     subgraph_ops: &[usize],
     granularity: &Granularity,

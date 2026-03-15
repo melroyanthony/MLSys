@@ -247,7 +247,6 @@ def _output_tensor_for_subgraph(
     The 'canonical' output tensor of a subgraph for spatial tiling.
     This is the final boundary output tensor.
     """
-    produced_inside, consumed_inside, _ = _classify_tensors(subgraph_ops, problem)
     boundary_outputs = _boundary_outputs_for_subgraph(subgraph_ops, problem)
 
     if not boundary_outputs:
