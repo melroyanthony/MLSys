@@ -314,9 +314,9 @@ def optimize(problem: Problem) -> Solution:
                     lat_b = compute_subgraph_latency(
                         sg_ops[i + 1], g_b, problem, set(), tensors_to_retain_after=set()
                     )
-                    boundary_cost = _boundary_dram_cost(sg_ops[i], sg_ops[i + 1], problem)
-
-                    if lat_fused < lat_a + lat_b + boundary_cost:
+                    # lat_a already includes evicting boundary outputs;
+                    # lat_b already includes loading them. No separate boundary cost.
+                    if lat_fused < lat_a + lat_b:
                         new_sg_ops.append(merged)
                         i += 2
                         changed = True

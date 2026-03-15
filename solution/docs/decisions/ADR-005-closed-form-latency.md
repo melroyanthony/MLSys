@@ -67,4 +67,4 @@ The closed-form computation must produce **exactly the same numerical result** a
 ### Mitigations
 - Add a debug assertion that compares closed-form result against simulation result for each candidate during testing
 - Pointwise-only subgraphs (k=1, no MatMul reuse patterns) use a simplified formula: `num_tiles * max(compute, memory)` since all tiles are identical
-- Keep the simulation as the reference implementation for the `evaluate` subcommand; only the search inner loop uses the closed-form
+- The closed-form replaces the simulation for all raster-order evaluation (both search and evaluate subcommand). Snake/custom traversal orders retain the tile-by-tile simulation since their memory pattern is non-uniform
