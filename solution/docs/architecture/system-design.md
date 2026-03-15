@@ -231,6 +231,8 @@ Where:
 
 The first tile of each row must load all inputs fresh (LHS strip changes with each row). Subsequent tiles in the same row reuse the LHS strip. This distinction is what makes closed-form possible: all "first" tiles have identical cost, and all "subsequent" tiles have identical cost.
 
+**Split-K mode** (num_k_steps > 1): All spatial tiles are identical — there is no row-reuse across tiles because the k-step loop occupies the full tile execution. The per-tile latency is computed as `first_k_lat + (num_k_steps - 2) * interior_k_lat + last_k_lat`, then multiplied by `num_spatial_tiles`. The row-reuse derivation above applies only to the **spatial-only** case (num_k_steps == 1).
+
 For **Pointwise-only subgraphs** (num_k_steps = 1, no MatMul reuse patterns), the formula simplifies to `num_tiles * max(compute, memory)` since all tiles are identical.
 
 This reduces candidate evaluation from O(tiles * k_steps) to O(1), making the entire granularity search O(candidates) where candidates = O(log W * log H * log K_full).
