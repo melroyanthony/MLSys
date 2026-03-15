@@ -243,45 +243,68 @@ def _output_tensor_for_subgraph(
 # ---------------------------------------------------------------------------
 
 
+def _graph_outputs(problem: Problem) -> set[int]:
+    """Tensor indices that are not consumed by any op (graph outputs)."""
+    consumed: set[int] = set()
+    for op in problem.ops:
+        consumed.update(op.inputs)
+    all_tensors = set(range(len(problem.tensors)))
+    return all_tensors - consumed
+
+
 def _categorize_inputs(
     subgraph_ops: list[int],
     problem: Problem,
     boundary_inputs: set[int],
     is_split_k: bool,
-) -> tuple[set[int], set[int], set[int]]:
+) -> tuple[set[int], set[int], set[int], set[int]]:
     """
-    Categorize boundary inputs into:
-    - lhs_inputs: MatMul LHS tensors. These are loaded as row-strips
-      (h × K_full elements) per spatial tile and reused across k-steps.
-      In non-split-K (k==K_full), this is the full row-strip per tile.
-    - rhs_streamed_inputs: MatMul RHS tensors that are streamed as
-      k-strips (k × w elements) per k-step.
-    - pw_inputs: Pointwise inputs (loaded as w×h slices per spatial tile).
+    Categorize boundary inputs into (matching Rust build_memory_plan):
+    - full_load_lhs: MatMul LHS with ephemeral output — loaded as row-strips
+      (h × K_full) once per spatial tile, reused across k-steps and columns.
+    - k_strip_lhs: MatMul LHS with non-ephemeral output — loaded as k-strips
+      (h × k) every k-step.
+    - rhs_streamed: MatMul RHS (always k-strips, k × w per k-step).
+    - pw_inputs: Pointwise inputs (w × h per spatial tile).
 
-    Key insight from Example 4A (non-split-K):
-      LHS row-strip = h × K_full loaded per spatial-tile-row (reused across cols).
-      RHS col-strip = K_full × w loaded per spatial-tile-col (reused across rows).
-
-    Key insight from Example 5B (split-K):
-      LHS loaded at h × K_full(op) = 128×128 per spatial tile (once, resident).
-      RHS streamed at k × w per k-step.
+    The key distinction: ephemeral-output MatMul LHS goes to full_load (row-reusable),
+    non-ephemeral-output MatMul LHS goes to k_strip (reloaded each k-step).
     """
-    lhs_inputs: set[int] = set()
+    op_set = set(subgraph_ops)
+    full_load_lhs: set[int] = set()
+    k_strip_lhs: set[int] = set()
     rhs_streamed: set[int] = set()
     pw_inputs: set[int] = set()
+    seen: set[int] = set()
 
     for op_idx in subgraph_ops:
         op = problem.ops[op_idx]
         if op.op_type == "MatMul":
             lhs_idx = op.inputs[0]
             rhs_idx = op.inputs[1]
-            if lhs_idx in boundary_inputs:
-                lhs_inputs.add(lhs_idx)
-            if rhs_idx in boundary_inputs:
+            out_t = op.outputs[0]
+
+            # Is output ephemeral? (consumed only within subgraph)
+            consumers = [i for i, o in enumerate(problem.ops)
+                         if out_t in o.inputs]
+            output_ephemeral = (
+                out_t not in _graph_outputs(problem)
+                and all(c in op_set for c in consumers)
+            )
+
+            if lhs_idx in boundary_inputs and lhs_idx not in seen:
+                seen.add(lhs_idx)
+                if output_ephemeral:
+                    full_load_lhs.add(lhs_idx)  # h * K_full, row-reusable
+                else:
+                    k_strip_lhs.add(lhs_idx)     # h * k, per k-step
+            if rhs_idx in boundary_inputs and rhs_idx not in seen:
+                seen.add(rhs_idx)
                 rhs_streamed.add(rhs_idx)
         else:  # Pointwise
             for t in op.inputs:
-                if t in boundary_inputs:
+                if t in boundary_inputs and t not in seen:
+                    seen.add(t)
                     pw_inputs.add(t)
 
     return lhs_inputs, rhs_streamed, pw_inputs
@@ -454,8 +477,8 @@ def compute_subgraph_latency(
         else:
             pointwise_compute += op.base_cost
 
-    # Categorize boundary inputs
-    lhs_inputs, rhs_streamed_inputs, pw_inputs = _categorize_inputs(
+    # Categorize boundary inputs (matches Rust build_memory_plan)
+    full_load_lhs, k_strip_lhs, rhs_streamed_inputs, pw_inputs = _categorize_inputs(
         subgraph_ops, problem, boundary_inputs, is_split_k
     )
 
@@ -463,12 +486,19 @@ def compute_subgraph_latency(
 
     # Pre-compute memory totals needed for both the fast path and the simulation path.
 
-    # LHS: sum of (h * K_full_lhs) for each non-retained LHS input.
-    # In split-K mode: loaded once per spatial tile (first k-step).
-    # In spatial-only mode: loaded once per tile-row.
-    lhs_load_per_row = sum(
+    # full_load LHS (ephemeral-output MatMul): h * K_full, row-reusable.
+    # In split-K: loaded once per spatial tile (first k-step).
+    # In spatial-only: loaded once per tile-row (reused across columns).
+    full_load_per_row = sum(
         (h * problem.tensors[t_idx].width) / bw
-        for t_idx in lhs_inputs
+        for t_idx in full_load_lhs
+        if t_idx not in retained_tensors
+    )
+
+    # k_strip LHS (non-ephemeral-output MatMul): h * k, per k-step.
+    k_strip_lhs_per_step = sum(
+        (h * k) / bw
+        for t_idx in k_strip_lhs
         if t_idx not in retained_tensors
     )
 
@@ -478,6 +508,9 @@ def compute_subgraph_latency(
         for t_idx in rhs_streamed_inputs
         if t_idx not in retained_tensors
     )
+
+    # Total k_strip load per step (k_strip LHS + RHS)
+    k_strip_total_per_step = k_strip_lhs_per_step + rhs_load_per_step
 
     # Pointwise inputs: w * h per spatial tile (first k-step).
     pw_load_per_tile = sum(
@@ -499,24 +532,19 @@ def compute_subgraph_latency(
     if traversal_order is None:
         if is_split_k:
             # Split-K mode: all spatial tiles are identical (no row-reuse).
-            # In split-K, full_load tensors (LHS) are loaded per spatial tile
-            # because the k-step loop occupies the entire tile execution.
-            # First k-step of each spatial tile:
-            #   mem = full_load (LHS) + pw_load + rhs_strip
-            #   compute = matmul_compute_per_step
-            first_k_mem = lhs_load_per_row + pw_load_per_tile + rhs_load_per_step
+            # full_load LHS loaded once per tile. k_strip LHS + RHS loaded every k-step.
+            # First k-step: full_load + pw_load + k_strip_total
+            first_k_mem = full_load_per_row + pw_load_per_tile + k_strip_total_per_step
             first_k_lat = max(matmul_compute_per_step, first_k_mem)
 
-            # Interior k-steps: mem = rhs_load_per_step only
+            # Interior k-steps: k_strip_total only
             if num_k_steps > 2:
-                interior_mem = rhs_load_per_step
-                interior_k_lat = max(matmul_compute_per_step, interior_mem)
+                interior_k_lat = max(matmul_compute_per_step, k_strip_total_per_step)
             else:
                 interior_k_lat = 0.0
 
-            # Last k-step: mem = rhs_load_per_step + out_evict_per_tile
-            #              compute = matmul_compute_per_step + pointwise_compute
-            last_k_mem = rhs_load_per_step + out_evict_per_tile
+            # Last k-step: k_strip_total + eviction, compute includes PW
+            last_k_mem = k_strip_total_per_step + out_evict_per_tile
             last_k_lat = max(matmul_compute_per_step + pointwise_compute, last_k_mem)
 
             per_tile_lat = first_k_lat + max(0, num_k_steps - 2) * interior_k_lat + last_k_lat
@@ -524,14 +552,13 @@ def compute_subgraph_latency(
 
         else:
             # Spatial-only mode (num_k_steps == 1): row-reuse pattern.
-            # First tile of each row: load lhs + rhs + pw, then evict output.
-            # Subsequent tiles: load rhs + pw, then evict output.
+            # full_load LHS reused across columns. k_strip LHS + RHS loaded per tile.
             compute = matmul_compute_per_step + pointwise_compute
 
-            first_col_mem = lhs_load_per_row + rhs_load_per_step + pw_load_per_tile + out_evict_per_tile
+            first_col_mem = full_load_per_row + k_strip_total_per_step + pw_load_per_tile + out_evict_per_tile
             first_col_lat = max(compute, first_col_mem)
 
-            other_col_mem = rhs_load_per_step + pw_load_per_tile + out_evict_per_tile
+            other_col_mem = k_strip_total_per_step + pw_load_per_tile + out_evict_per_tile
             other_col_lat = max(compute, other_col_mem)
 
             return num_tiles_h * (first_col_lat + max(0, num_tiles_w - 1) * other_col_lat)
@@ -545,9 +572,9 @@ def compute_subgraph_latency(
     total_latency = 0.0
 
     # Track intra-subgraph residency for row/col strips.
-    # For LHS: resident_lhs[t_idx] = tile_row that is currently loaded (-1 = none)
-    # For RHS (non-split-K): resident_rhs[t_idx] = tile_col currently loaded (-1 = none)
-    resident_lhs: dict[int, int] = {t: -1 for t in lhs_inputs}
+    # full_load_lhs: row-reusable (resident across columns in same row)
+    # k_strip_lhs: loaded every k-step (no row-reuse)
+    resident_full_lhs: dict[int, int] = {t: -1 for t in full_load_lhs}
     resident_rhs: dict[int, int] = {t: -1 for t in rhs_streamed_inputs}
 
     for spatial_step, tile_flat_idx in enumerate(tile_sequence):
@@ -561,17 +588,23 @@ def compute_subgraph_latency(
             mem_in = 0.0
             mem_out = 0.0
 
-            # ------- LHS tensors -------
+            # ------- full_load LHS (ephemeral-output MatMul, row-reusable) -------
             if is_first_k:
-                for t_idx in lhs_inputs:
+                for t_idx in full_load_lhs:
                     if t_idx in retained_tensors:
                         continue
-                    if resident_lhs[t_idx] != tile_row:
+                    if is_split_k or resident_full_lhs[t_idx] != tile_row:
                         k_full_lhs = problem.tensors[t_idx].width
                         mem_in += (h * k_full_lhs) / bw
-                        resident_lhs[t_idx] = tile_row
+                        resident_full_lhs[t_idx] = tile_row
 
-            # ------- RHS tensors -------
+            # ------- k_strip LHS (non-ephemeral-output MatMul, per k-step) -------
+            for t_idx in k_strip_lhs:
+                if t_idx in retained_tensors:
+                    continue
+                mem_in += (h * k) / bw
+
+            # ------- RHS tensors (k_strip, per k-step in split-K, per column in spatial) -------
             if is_split_k:
                 for t_idx in rhs_streamed_inputs:
                     if t_idx in retained_tensors:
