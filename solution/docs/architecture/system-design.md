@@ -144,7 +144,7 @@ Input JSON
     |                       no retention, no fusion
     v
 [4. Cost-Based Fusion] --> merge adjacent ops into subgraphs only
-    |                       when fused latency < split latency + boundary cost
+    |                       when fused latency < lat_a + lat_b
     v
 [5. Tensor Retention] --> for each subgraph boundary, decide which
     |                      output tensors to retain in fast memory
@@ -497,7 +497,7 @@ total_latency = sum(subgraph_latency for each subgraph)
 1. **Rust zero-cost abstractions**: The scheduler performs integer arithmetic, comparisons, and vector operations. Rust compiles to native code with no garbage collection pauses.
 2. **Closed-form granularity evaluation (ADR-005)**: Candidate (w, h, k) triples are evaluated using a closed-form latency formula instead of tile-by-tile simulation. This reduces per-candidate evaluation from O(tiles * k_steps) to O(1). The search space remains O(log W * log H * log K) candidates per subgraph, with each evaluation being a constant-time arithmetic expression. See ADR-005 for the derivation and correctness argument.
 3. **Early termination on OOM**: Before computing the closed-form latency for any candidate, the working set is checked against `fast_memory_capacity`. Infeasible candidates are pruned immediately, avoiding even the O(1) latency computation. For memory-constrained subgraphs, this eliminates the majority of the search space.
-4. **Cost-based fusion (Issue #16)**: Before merging two subgraphs, the optimizer compares `latency(fused, best_granularity)` against `latency(A, best_A) + latency(B, best_B) + DRAM_boundary_cost`. This prevents harmful merges where a shared granularity degrades overall latency. The cost comparison uses the same closed-form evaluator, so it adds negligible overhead.
+4. **Cost-based fusion (Issue #16)**: Before merging two subgraphs, the optimizer compares `latency(fused, best_granularity)` against `latency(A, best_A) + latency(B, best_B)`. Individual latencies already include DRAM boundary transfers (eviction from A, loading into B), so no separate boundary cost is added. The cost comparison uses the same closed-form evaluator, so it adds negligible overhead.
 5. **Topological sort**: Kahn's algorithm, O(V + E), runs once.
 6. **Total optimizer complexity**: O(N^2) for fusion (N = number of ops, each candidate merge requires a cost comparison), O(G) for granularity search per subgraph (G = candidate granularities, each O(1)). All 5 benchmarks complete end-to-end in under 2 seconds.
 7. **Static binary**: `cargo build --release` with `lto = true` and `codegen-units = 1` produces a fully optimized, statically linked binary with no runtime dependencies.

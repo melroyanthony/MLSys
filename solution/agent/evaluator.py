@@ -498,9 +498,11 @@ def compute_subgraph_latency(
     # ------------------------------------------------------------------
     if traversal_order is None:
         if is_split_k:
-            # Split-K mode: all spatial tiles are identical.
+            # Split-K mode: all spatial tiles are identical (no row-reuse).
+            # In split-K, full_load tensors (LHS) are loaded per spatial tile
+            # because the k-step loop occupies the entire tile execution.
             # First k-step of each spatial tile:
-            #   mem = lhs_load_per_row + pw_load_per_tile + rhs_load_per_step
+            #   mem = full_load (LHS) + pw_load + rhs_strip
             #   compute = matmul_compute_per_step
             first_k_mem = lhs_load_per_row + pw_load_per_tile + rhs_load_per_step
             first_k_lat = max(matmul_compute_per_step, first_k_mem)

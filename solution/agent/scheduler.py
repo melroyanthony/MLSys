@@ -254,7 +254,7 @@ def optimize(problem: Problem) -> Solution:
                     g_merged = _find_safe_k(merged, g_native, problem, set())
 
                 if g_merged is not None:
-                    # Cost comparison: fused vs. separate + DRAM boundary.
+                    # Cost comparison: fused vs. separate (DRAM already in lat_a/lat_b).
                     lat_fused = compute_subgraph_latency(
                         merged, g_merged, problem, set(), tensors_to_retain_after=set()
                     )
