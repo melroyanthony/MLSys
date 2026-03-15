@@ -256,12 +256,13 @@ def _categorize_inputs(
     subgraph_ops: list[int],
     problem: Problem,
     boundary_inputs: set[int],
-    is_split_k: bool,
 ) -> tuple[set[int], set[int], set[int], set[int]]:
     """
     Categorize boundary inputs into (matching Rust build_memory_plan):
     - full_load_lhs: MatMul LHS with ephemeral output — loaded as row-strips
-      (h × K_full) once per spatial tile, reused across k-steps and columns.
+      (h × K_full). In split-K: loaded once per tile (reused across k-steps within
+      tile, NOT across tiles). In spatial-only: loaded once per tile-row (reused
+      across columns in same row).
     - k_strip_lhs: MatMul LHS with non-ephemeral output — loaded as k-strips
       (h × k) every k-step.
     - rhs_streamed: MatMul RHS (always k-strips, k × w per k-step).
@@ -277,6 +278,13 @@ def _categorize_inputs(
     pw_inputs: set[int] = set()
     seen: set[int] = set()
 
+    # Precompute tensor consumers for ephemeral detection
+    tensor_consumers: dict[int, list[int]] = {}
+    for i, op in enumerate(problem.ops):
+        for t in op.inputs:
+            tensor_consumers.setdefault(t, []).append(i)
+    graph_outs = _graph_outputs(problem)
+
     for op_idx in subgraph_ops:
         op = problem.ops[op_idx]
         if op.op_type == "MatMul":
@@ -285,11 +293,9 @@ def _categorize_inputs(
             out_t = op.outputs[0]
 
             # Is output ephemeral? (consumed only within subgraph)
-            consumers = [i for i, o in enumerate(problem.ops)
-                         if out_t in o.inputs]
             output_ephemeral = (
-                out_t not in _graph_outputs(problem)
-                and all(c in op_set for c in consumers)
+                out_t not in graph_outs
+                and all(c in op_set for c in tensor_consumers.get(out_t, []))
             )
 
             if lhs_idx in boundary_inputs and lhs_idx not in seen:
@@ -364,7 +370,7 @@ def compute_working_set(
 
     # Categorize boundary inputs (4-tuple matching build_memory_plan)
     full_load_lhs, k_strip_lhs, rhs_streamed, pw_inputs = _categorize_inputs(
-        subgraph_ops, problem, boundary_inputs, is_split_k
+        subgraph_ops, problem, boundary_inputs
     )
 
     # full_load LHS (ephemeral-output MatMul): h × K_full, resident across k-steps
@@ -483,7 +489,7 @@ def compute_subgraph_latency(
 
     # Categorize boundary inputs (matches Rust build_memory_plan)
     full_load_lhs, k_strip_lhs, rhs_streamed_inputs, pw_inputs = _categorize_inputs(
-        subgraph_ops, problem, boundary_inputs, is_split_k
+        subgraph_ops, problem, boundary_inputs
     )
 
     bw = problem.slow_memory_bandwidth

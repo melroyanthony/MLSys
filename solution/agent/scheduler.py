@@ -229,6 +229,22 @@ def optimize(problem: Problem) -> Solution:
     # We merge sg[i] and sg[i+1] if:
     #   1. The merged subgraph fits in memory (with some valid granularity).
     #   2. lat_fused < lat_a + lat_b (boundary DRAM already in lat_a/lat_b)
+
+    def _cached_best(ops: list[int], cache: dict) -> tuple[Granularity, float]:
+        """Get cached (best_gran, latency) for a group, computing if absent."""
+        key = tuple(ops)
+        if key not in cache:
+            g = _find_safe_granularity(ops, problem, set())
+            if g is None:
+                matmuls = [o for o in ops if problem.ops[o].op_type == "MatMul"]
+                kf = _k_full_for_op(problem.ops[matmuls[0]], problem) if matmuls else 1
+                g = Granularity(native_w, native_h, kf)
+            lat = compute_subgraph_latency(ops, g, problem, set(), tensors_to_retain_after=set())
+            cache[key] = (g, lat)
+        return cache[key]
+
+    lat_cache: dict[tuple[int, ...], tuple[Granularity, float]] = {}
+
     changed = True
     while changed:
         changed = False
@@ -238,10 +254,8 @@ def optimize(problem: Problem) -> Solution:
             if i + 1 < len(sg_ops):
                 merged = sg_ops[i] + sg_ops[i + 1]
 
-                # Find a feasible granularity for the merged subgraph.
                 g_merged = _find_safe_granularity(merged, problem, set())
                 if g_merged is None:
-                    # Try just split-k with native spatial dims.
                     matmul_in_merged = [o for o in merged
                                         if problem.ops[o].op_type == "MatMul"]
                     if matmul_in_merged:
@@ -254,37 +268,16 @@ def optimize(problem: Problem) -> Solution:
                     g_merged = _find_safe_k(merged, g_native, problem, set())
 
                 if g_merged is not None:
-                    # Cost comparison: fused vs. separate (DRAM already in lat_a/lat_b).
                     lat_fused = compute_subgraph_latency(
                         merged, g_merged, problem, set(), tensors_to_retain_after=set()
                     )
+                    _, lat_a = _cached_best(sg_ops[i], lat_cache)
+                    _, lat_b = _cached_best(sg_ops[i + 1], lat_cache)
 
-                    g_a = _find_safe_granularity(sg_ops[i], problem, set())
-                    if g_a is None:
-                        matmul_in_a = [o for o in sg_ops[i]
-                                       if problem.ops[o].op_type == "MatMul"]
-                        k_full_a = _k_full_for_op(problem.ops[matmul_in_a[0]], problem) \
-                            if matmul_in_a else 1
-                        g_a = Granularity(native_w, native_h, k_full_a)
-
-                    g_b = _find_safe_granularity(sg_ops[i + 1], problem, set())
-                    if g_b is None:
-                        matmul_in_b = [o for o in sg_ops[i + 1]
-                                       if problem.ops[o].op_type == "MatMul"]
-                        k_full_b = _k_full_for_op(problem.ops[matmul_in_b[0]], problem) \
-                            if matmul_in_b else 1
-                        g_b = Granularity(native_w, native_h, k_full_b)
-
-                    lat_a = compute_subgraph_latency(
-                        sg_ops[i], g_a, problem, set(), tensors_to_retain_after=set()
-                    )
-                    lat_b = compute_subgraph_latency(
-                        sg_ops[i + 1], g_b, problem, set(), tensors_to_retain_after=set()
-                    )
-                    # lat_a already includes evicting boundary outputs;
-                    # lat_b already includes loading them. No separate boundary cost.
                     if lat_fused < lat_a + lat_b:
                         new_sg_ops.append(merged)
+                        # Cache the merged result
+                        lat_cache[tuple(merged)] = (g_merged, lat_fused)
                         i += 2
                         changed = True
                         continue
