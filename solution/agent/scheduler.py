@@ -269,6 +269,7 @@ def optimize(problem: Problem) -> Solution:
                     for o in merged if problem.ops[o].op_type == "MatMul"
                 ]
                 if matmul_k_fulls and len(set(matmul_k_fulls)) > 1:
+                    rejected_merges.add(merge_key)
                     new_sg_ops.append(sg_ops[i])
                     i += 1
                     continue
@@ -279,6 +280,7 @@ def optimize(problem: Problem) -> Solution:
                     dims = [(problem.tensors[t].width, problem.tensors[t].height)
                             for t in boundary_outs]
                     if len(set(dims)) > 1:
+                        rejected_merges.add(merge_key)
                         new_sg_ops.append(sg_ops[i])
                         i += 1
                         continue
