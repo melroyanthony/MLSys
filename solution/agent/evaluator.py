@@ -253,15 +253,16 @@ def _precompute_problem_info(problem: Problem) -> tuple[dict[int, list[int]], se
     return tensor_consumers, graph_outs
 
 
-# Module-level cache keyed by id(problem) to avoid recomputation per call.
-_problem_info_cache: dict[int, tuple[dict[int, list[int]], set[int]]] = {}
+# Single-entry cache: stores (problem_ref, info) for the last Problem seen.
+# Safe against id-reuse because we compare identity, not id().
+_cached_problem: list = [None, None]  # [problem_object, (tensor_consumers, graph_outputs)]
 
 
 def _get_problem_info(problem: Problem) -> tuple[dict[int, list[int]], set[int]]:
-    pid = id(problem)
-    if pid not in _problem_info_cache:
-        _problem_info_cache[pid] = _precompute_problem_info(problem)
-    return _problem_info_cache[pid]
+    if _cached_problem[0] is not problem:
+        _cached_problem[0] = problem
+        _cached_problem[1] = _precompute_problem_info(problem)
+    return _cached_problem[1]
 
 
 def _categorize_inputs(
