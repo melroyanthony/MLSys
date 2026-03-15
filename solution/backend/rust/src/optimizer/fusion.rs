@@ -31,7 +31,9 @@ pub fn greedy_fusion(
 
     // Cache best latency per group to avoid redundant granularity searches.
     // Entry is (best_granularity, best_latency). Invalidated on merge.
+    // Also cache rejected merges to avoid re-evaluating unchanged pairs.
     let retained_before: HashSet<usize> = HashSet::new();
+    let mut rejected_merges: HashSet<(Vec<usize>, Vec<usize>)> = HashSet::new();
     let mut cache: Vec<Option<(Granularity, f64)>> = groups
         .iter()
         .map(|ops| {
@@ -51,6 +53,15 @@ pub fn greedy_fusion(
 
         while i < groups.len() {
             if i + 1 < groups.len() {
+                // Skip previously rejected pairs that haven't changed.
+                let merge_key = (groups[i].clone(), groups[i + 1].clone());
+                if rejected_merges.contains(&merge_key) {
+                    new_groups.push(groups[i].clone());
+                    new_cache.push(cache[i].take());
+                    i += 1;
+                    continue;
+                }
+
                 let merged: Vec<usize> = groups[i]
                     .iter()
                     .chain(groups[i + 1].iter())
@@ -100,7 +111,10 @@ pub fn greedy_fusion(
                             subgraph_latency(&groups[i + 1], &g, &[], &retained_before, problem, dag)
                         });
 
-                        if lat_fused < lat_a + lat_b {
+                        // Only merge when fused is meaningfully better (relative tolerance).
+                        let lat_split = lat_a + lat_b;
+                        let eps = 1.0_f64.max(lat_split.abs()) * 1e-9;
+                        if lat_fused < lat_split - eps {
                             new_groups.push(merged);
                             // Cache the merged group's result.
                             new_cache.push(Some((merged_gran, lat_fused)));
@@ -110,6 +124,8 @@ pub fn greedy_fusion(
                         }
                     }
                 }
+                // Cache this pair as rejected so we don't re-evaluate.
+                rejected_merges.insert(merge_key);
             }
             new_groups.push(groups[i].clone());
             new_cache.push(cache[i].take());

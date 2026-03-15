@@ -245,6 +245,7 @@ def optimize(problem: Problem) -> Solution:
         return cache[key]
 
     lat_cache: dict[tuple[int, ...], tuple[Granularity, float]] = {}
+    rejected_merges: set[tuple[tuple[int, ...], tuple[int, ...]]] = set()
 
     changed = True
     while changed:
@@ -253,6 +254,13 @@ def optimize(problem: Problem) -> Solution:
         i = 0
         while i < len(sg_ops):
             if i + 1 < len(sg_ops):
+                # Skip previously rejected pairs.
+                merge_key = (tuple(sg_ops[i]), tuple(sg_ops[i + 1]))
+                if merge_key in rejected_merges:
+                    new_sg_ops.append(sg_ops[i])
+                    i += 1
+                    continue
+
                 merged = sg_ops[i] + sg_ops[i + 1]
 
                 # K_full consistency: all MatMuls must share the same K_full
@@ -303,13 +311,19 @@ def optimize(problem: Problem) -> Solution:
                     _, lat_a = _cached_best(sg_ops[i], lat_cache)
                     _, lat_b = _cached_best(sg_ops[i + 1], lat_cache)
 
-                    if lat_fused < lat_a + lat_b:
+                    # Only merge when fused is meaningfully better (relative tolerance).
+                    lat_split = lat_a + lat_b
+                    eps = max(1.0, abs(lat_split)) * 1e-9
+                    if lat_fused < lat_split - eps:
                         new_sg_ops.append(merged)
                         # Cache the merged result
                         lat_cache[tuple(merged)] = (g_merged, lat_fused)
                         i += 2
                         changed = True
                         continue
+
+                # Cache as rejected so we don't re-evaluate.
+                rejected_merges.add(merge_key)
 
             new_sg_ops.append(sg_ops[i])
             i += 1
