@@ -370,13 +370,17 @@ def compute_working_set(
     - Ephemeral tensors: 0 capacity
     - Retained tensors from previous subgraphs: full size
     - In split-K mode (num_k_steps > 1):
-      - LHS of MatMul (boundary input): FULL tensor size (loaded once, resident)
-      - RHS of MatMul (boundary input): k × w per k-step (streamed)
+      - full_load LHS (ephemeral-output MatMul): h × K_full row-strip per tile
+      - k_strip LHS (non-ephemeral-output MatMul): h × k per k-step
+      - Standard RHS: k × w per k-step
+      - Ephemeral-output RHS: rhs.height × k per k-step
       - Output accumulator: w × h (resident across k-steps)
       - Pointwise inputs: w × h per spatial tile
     - In non-split-K mode (num_k_steps == 1):
-      - MatMul LHS: h × k (= h × K_full) per tile
-      - MatMul RHS: k × w (= K_full × w) per tile
+      - full_load LHS: h × K_full row-strip, row-reusable
+      - k_strip LHS: h × k, row-reusable
+      - Standard RHS: k × w per column
+      - Ephemeral-output RHS: rhs.height × k per column
       - Output: w × h
     """
     w, h, k = gran.w, gran.h, gran.k
@@ -478,13 +482,14 @@ def compute_subgraph_latency(
     - retained_tensors: already in fast memory at full size; no load cost
     - tensors_to_retain_after: outputs that are RETAINED (not evicted) after this
       subgraph. These tensors do NOT incur mem_out cost.
-    - In split-K mode:
-      - LHS tensors: loaded FULLY in first k-step, held resident
-      - RHS tensors: streamed as k-strips per k-step
-      - Output accumulator: held resident, evicted on last k-step of each spatial tile
-    - In non-split-K mode (or pointwise):
-      - LHS treated as row-strips for intra-subgraph reuse tracking
-      - RHS treated as col-strips for intra-subgraph reuse tracking
+    - In split-K mode (num_k_steps > 1):
+      - full_load LHS (ephemeral-output MatMul): h × K_full row-strip, loaded once per tile
+      - k_strip LHS (non-ephemeral-output MatMul): h × k, loaded every k-step
+      - Standard RHS: k × w per k-step; Ephemeral-output RHS: rhs.height × k per k-step
+      - Output accumulator: w × h, evicted on last k-step of each spatial tile
+    - In spatial-only mode (num_k_steps == 1):
+      - full_load + k_strip LHS: row-reusable (loaded on first column of each row)
+      - RHS: loaded per column (col-reuse in snake traversal)
     """
     if tensors_to_retain_after is None:
         tensors_to_retain_after = set()
