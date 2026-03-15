@@ -50,7 +50,7 @@ Before computing the full closed-form latency for a candidate (w, h, k), check w
 
 ### Retained Behavior
 
-The closed-form computation must produce **exactly the same numerical result** as the tile-by-tile simulation for raster-order traversal. It is not an approximation -- it exploits the regularity of the raster pattern to avoid redundant computation. For non-raster traversal orders (snake/zig-zag), the simulation may still be needed if the reuse pattern is irregular, but in practice snake order has its own closed-form (every tile reuses one strip).
+The closed-form computation must produce **exactly the same numerical result** as the tile-by-tile simulation for raster-order traversal. It is not an approximation -- it exploits the regularity of the raster pattern to avoid redundant computation. For non-raster traversal orders (snake/zig-zag), the tile-by-tile simulation is retained because the reuse pattern depends on the specific tile sequence.
 
 ## Consequences
 
