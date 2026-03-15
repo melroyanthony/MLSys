@@ -51,10 +51,10 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 | 6 | **F-11: Solution JSON serializer** | Writes well-formed JSON matching the output schema; round-trips through a JSON validator; `null` traversal_orders serialize correctly | 2 | none |
 | 7 | **F-04: Baseline scheduler** | Produces one valid subgraph per operation; uses native granularity `[128, 128, K_full]`; `tensors_to_retain = []` for all; latency values match model; no OOM on any benchmark | 2 | F-01, F-02, F-03, F-11, F-14 |
 | 8 | **F-12: Benchmark runner** | CLI that accepts `--problem FILE --solution FILE`, calls evaluate logic, prints total latency and pass/fail | 3 | F-01, F-11 |
-| 9 | **F-05: Op grouping / chain fusion** | Greedy bottom-up fusion: group adjacent ops in topological order if merged working set fits in fast memory; verify latency improves vs. baseline on all 5 benchmarks | 6 | F-14, F-03, F-02 |
+| 9 | **F-05: Op grouping / chain fusion** | Cost-based fusion: group adjacent ops in topological order only when fused latency is strictly less than split latency plus DRAM boundary cost; verify latency improves vs. baseline on all 5 benchmarks | 6 | F-14, F-03, F-02 |
 | 10 | **F-07: Tensor retention** | After each subgraph, determine which output tensors are consumed by the immediately following subgraph and have sufficient residual capacity; retain them; verify improvement on Example 3C pattern | 4 | F-05, F-03 |
 | 11 | **F-08: Split-K** | For MatMul subgraphs where full-k working set exceeds capacity, search for the largest `k` divisor that fits; model accumulator as resident across k-steps; verify Example 5B latency | 5 | F-05, F-03, F-02 |
-| 12 | **F-06: Granularity search** | For each subgraph, try candidate `[w, h]` values (powers of 2 up to tensor dimensions); **for MatMul subgraphs, also search `k` from `K_full` down to 1 in powers of 2 (Issue #15 fix) — k must not be hardcoded to 1**; select the `[w, h, k]` combination that minimises subgraph latency within the OOM constraint; larger k values reduce the total number of k-steps and total memory reloads; verify Example 1C pattern and that k > 1 is chosen for MatMul ops where the memory budget allows | 8 | F-05, F-03, F-02 |
+| 12 | **F-06: Granularity search** | For each subgraph, try candidate `[w, h]` values (powers of 2 up to tensor dimensions); **for MatMul subgraphs, also search `k` from `K_full` down to 1 in powers of 2 (Issue #15 fix) -- k must not be hardcoded to 1**; use **closed-form latency evaluation** (ADR-005, Issue #16) instead of tile-by-tile simulation; select the `[w, h, k]` combination that minimises subgraph latency within the OOM constraint; larger k values reduce the total number of k-steps and total memory reloads; verify Example 1C pattern and that k > 1 is chosen for MatMul ops where the memory budget allows | 8 | F-05, F-03, F-02 |
 
 **Total MVP Estimated Effort: 43 hours**
 
@@ -62,6 +62,7 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 
 ## Acceptance Criteria
 
+### Correctness
 - [ ] All 5 PROBLEM.md example test cases pass with latencies matching to within 0.1 of the
   stated values
 - [ ] All 5 benchmark JSON files are parsed without error
@@ -75,22 +76,36 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
   `(w, h, k)` triple that minimizes total subgraph latency within `fast_memory_capacity` is
   selected (larger `k` is preferred as a tie-breaker when latencies are equal)
 
+### Performance (Issue #16)
+- [ ] Each of the 5 benchmarks completes end-to-end (parse, optimize, serialize) in under 2
+  seconds on a standard developer machine (M-series Mac or modern x86-64)
+- [ ] The granularity search stage must not be the performance bottleneck: candidate evaluation
+  uses closed-form latency (O(1) per candidate, not tile-by-tile simulation)
+- [ ] Cost-based fusion must not regress performance: the merge-vs-split comparison adds
+  negligible overhead relative to the O(N^2) fusion loop
+
+### Quality (Issue #16)
+- [ ] Fusion decisions are cost-based: merging two subgraphs only occurs when the fused latency
+  is strictly less than the split latency plus the DRAM boundary cost
+- [ ] No benchmark exhibits a latency regression from fusion (i.e., fusing never makes things
+  worse than keeping subgraphs separate)
+
 ---
 
 ## User Journey (Happy Path)
 
 ```
-1. Scheduler reads problem JSON         → Parses Problem struct with tensors, ops, hw params
-2. Topological sort                     → Linearized op execution order
-3. Baseline schedule generated          → Valid JSON, all ops covered, no OOM
-4. Greedy chain fusion applied          → Adjacent ops merged where memory allows
-5. Tensor retention decided             → Downstream-needed tensors flagged as resident
-6. Split-K applied to MatMul subgraphs  → k reduced to fit tight memory budgets
-7. Granularity search per subgraph      → Best [w, h, k] selected per latency model;
+1. Scheduler reads problem JSON         -> Parses Problem struct with tensors, ops, hw params
+2. Topological sort                     -> Linearized op execution order
+3. Baseline schedule generated          -> Valid JSON, all ops covered, no OOM
+4. Cost-based chain fusion applied      -> Adjacent ops merged only when fused latency wins
+5. Tensor retention decided             -> Downstream-needed tensors flagged as resident
+6. Split-K applied to MatMul subgraphs  -> k reduced to fit tight memory budgets
+7. Granularity search per subgraph      -> Best [w, h, k] selected via closed-form evaluation;
                                            k searched from K_full downward for MatMul ops
-8. Latency calculated for each subgraph → subgraph_latencies list populated
-9. Solution JSON written                → Ready for Evaluate() call
-10. Benchmark runner reports total      → Score vs. baseline shown; validated correct
+8. Latency calculated for each subgraph -> subgraph_latencies list populated
+9. Solution JSON written                -> Ready for Evaluate() call
+10. Benchmark runner reports total      -> Score vs. baseline shown; validated correct
 ```
 
 ---
@@ -99,11 +114,11 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 
 | Item | Why excluded | When to reconsider |
 |------|--------------|--------------------|
-| ~~Traversal order optimization (F-10)~~ | ~~~8% marginal gain~~ **IMPLEMENTED** as Stage 9 (snake/zig-zag traversal) | N/A — implemented |
+| ~~Traversal order optimization (F-10)~~ | ~~~8% marginal gain~~ **IMPLEMENTED** as Stage 9 (snake/zig-zag traversal) | N/A -- implemented |
 | Recomputation / graph-rewrite (F-09) | Higher complexity, benefit depends on diamond graph frequency; selective residency (F-07) covers most of the same gain | If benchmarks 1 or 17 show large latency gaps attributable to shared intermediates |
 | Advanced optimizer: DP/beam search (F-15) | 16h estimated effort, uncertain gain over greedy given contest time constraints | If greedy fusion produces solutions >20% above known-optimal reference |
 | Multi-device / parallel subgraph execution | Explicitly excluded by the problem's strict serialization model | Never (hard problem constraint) |
-| ~~C++ reimplementation~~ | ~~Python is sufficient~~ **SUPERSEDED**: Track A implemented in Rust for performance and static binary requirement | N/A — Rust chosen per ADR-001 |
+| ~~C++ reimplementation~~ | ~~Python is sufficient~~ **SUPERSEDED**: Track A implemented in Rust for performance and static binary requirement | N/A -- Rust chosen per ADR-001 |
 
 ---
 
@@ -111,11 +126,11 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 
 | Stage | Activities | Est. (h) |
 |-------|-----------|----------|
-| Stage 1 — Requirements | This document set | 0.5 |
-| Stage 2 — Architecture | Data model design, module structure, latency model spec | 2 |
-| Stage 3 — Implementation | F-14, F-01, F-02, F-03, F-04, F-11, F-12, F-05, F-07, F-08, F-06 | 43 |
-| Stage 4 — Testing | Regression tests (F-13), benchmark runs, latency verification | 5 |
-| Stage 5 — Finalization | Code review, documentation, solution JSON submission | 2 |
+| Stage 1 -- Requirements | This document set | 0.5 |
+| Stage 2 -- Architecture | Data model design, module structure, latency model spec | 2 |
+| Stage 3 -- Implementation | F-14, F-01, F-02, F-03, F-04, F-11, F-12, F-05, F-07, F-08, F-06 | 43 |
+| Stage 4 -- Testing | Regression tests (F-13), benchmark runs, latency verification | 5 |
+| Stage 5 -- Finalization | Code review, documentation, solution JSON submission | 2 |
 | **Total** | | **52.5** |
 
 ---
@@ -125,10 +140,10 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 | Risk | Probability | Impact | Mitigation |
 |------|-------------|--------|------------|
 | Latency model does not match `Evaluate()` due to undocumented edge cases | M | H | Implement F-13 regression tests against all 5 worked examples before writing optimizer |
-| Greedy fusion produces suboptimal groupings leaving significant latency on the table | H | M | Instrument the optimizer to report latency breakdown per subgraph; reserve time for targeted tuning on worst benchmarks |
+| Greedy fusion produces suboptimal groupings leaving significant latency on the table | H | M | Use cost-based fusion (Issue #16): compare fused vs. split latency before merging; instrument the optimizer to report latency breakdown per subgraph |
 | Split-K search space is too large for exhaustive search on benchmark 17 (95+ ops, large tensors) | M | M | Limit k candidates to powers of 2; use binary search for the largest k that fits |
 | Memory model for retained tensors across subgraph boundaries is mis-specified (e.g., capacity accounting for loaded inputs vs. outputs) | M | H | Validate against Example 3C (selective residency) and Example 5B (split-K with accumulator) before enabling retention |
 | Benchmark 17 (160 tensors, 95+ ops, 500K fast memory) has complex topology that greedy fusion mishandles | M | M | Analyze graph structure in architecture stage; design fusion rules for the attention-like repeating pattern observed in benchmarks 9, 13, 17 |
 | Working-set formula for subgraphs containing both MatMul and Pointwise ops is incorrectly specified | L | H | Cross-check against Example 5B which has exactly this combination; add a dedicated test case |
-| Python runtime too slow for benchmark 17 | L | M | Profile early; use NumPy-free pure Python for the scheduler logic (only arithmetic, no array ops needed) |
+| Granularity search too slow on large benchmarks (Issue #16) | H | H | Use closed-form latency evaluation (ADR-005) instead of tile-by-tile simulation; early termination on OOM; target < 2s per benchmark |
 | Granularity search defaults to k=1 for MatMul ops (Issue #15) | H | H | Search k from K_full downward; select the (w,h,k) minimizing total latency (larger k as tie-breaker); add regression test asserting k > 1 on any benchmark where K_full > 1 and memory allows |
