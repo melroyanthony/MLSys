@@ -231,6 +231,9 @@ pub fn compute_num_k_steps(
             }
         })
         .min();
+    if k <= 0 {
+        return 1; // Guard against division by zero from malformed input
+    }
     match min_k_full {
         Some(kf) => (kf + k - 1) / k,
         None => 1,
