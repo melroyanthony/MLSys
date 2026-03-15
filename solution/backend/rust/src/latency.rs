@@ -72,8 +72,10 @@ pub fn compute_time_per_step(
 /// - k_strip: tensors loaded fresh at each k-step
 /// - out_evict_size: size of output slice evicted on the last k-step
 pub struct StepMemoryPlan {
-    /// (tensor_id, elements) for tensors loaded fully once per spatial tile, on first k-step.
-    /// These benefit from row-reuse in spatial tiling (e.g., MatMul LHS row strips).
+    /// (tensor_id, elements) for tensors that benefit from row-reuse.
+    /// In split-K mode (num_k_steps > 1): loaded on first k-step of each spatial tile.
+    /// In spatial-only mode (num_k_steps == 1): loaded only on first column of each row
+    /// (reused across columns in the same tile-row, e.g., MatMul LHS row strips).
     pub full_load: Vec<(usize, i64)>,
     /// (tensor_id, elements) for tensors loaded at each k-step
     pub k_strip: Vec<(usize, i64)>,
