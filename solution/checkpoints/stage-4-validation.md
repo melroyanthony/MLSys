@@ -6,7 +6,7 @@
 - Remaining: ~60 minutes (Stage 5)
 
 ## Deliverables
-- [x] Track A (Rust) unit tests - 15 tests passing
+- [x] Track A (Rust) unit tests - 18 tests passing
 - [x] Track B (Python) unit tests - 29 tests passing
 - [x] E2E happy path script - 13/13 tests passing
 - [x] Both tracks validated against all 5 benchmarks
@@ -43,6 +43,7 @@
 |-------|------|-------|--------|
 | Track A (Rust) - Latency model examples | `src/main.rs` | 9 | PASS |
 | Track A (Rust) - Edge cases + benchmarks | `src/main.rs` | 6 | PASS |
+| Track A (Rust) - Mixed-K + split-K + boundary PW | `src/main.rs` | 3 | PASS |
 | Track B (Python) - Example 1 (Pointwise chain) | `tests/test_evaluator.py` | 4 | PASS |
 | Track B (Python) - Example 2 (Larger tensors) | `tests/test_evaluator.py` | 2 | PASS |
 | Track B (Python) - Example 3 (Diamond graph) | `tests/test_evaluator.py` | 5 | PASS |
@@ -50,9 +51,9 @@
 | Track B (Python) - Example 5 (Split-K) | `tests/test_evaluator.py` | 1 | PASS |
 | Track B (Python) - Edge cases | `tests/test_evaluator.py` | 11 | PASS |
 | Track B (Python) - Benchmark integration | `tests/test_evaluator.py` | 5 | PASS |
-| **Total** | | **44** | **PASS** |
+| **Total** | | **47** | **PASS** |
 
-### Rust Test Details (15 tests)
+### Rust Test Details (18 tests)
 
 | Test | Validates |
 |------|-----------|
@@ -71,6 +72,9 @@
 | test_edge_fusion_ephemeral_correctness | Tensor 3 ephemeral in fused [0,1] |
 | test_edge_cyclic_dag_rejected | Cyclic input returns Err("cycle") |
 | test_benchmark_solutions_validity | All 5 benchmarks: full op coverage, valid JSON |
+| test_fused_matmul_pointwise_splitk | Fused MatMul+Pointwise with split-K granularity |
+| test_boundary_pw_input | Boundary Pointwise input tensor memory accounting |
+| test_mixed_k_two_matmuls | Two MatMuls with different K_full in same subgraph |
 
 ### E2E Tests
 
@@ -100,7 +104,7 @@
 | Track A Scheduler | Rust (Cargo, edition 2021) | Compiled and passing |
 | Track B Agent | Python 3.12 + google-genai | Imports OK, baseline mode works |
 | Track B Evaluator | Pure Python (no external deps) | 29 tests passing |
-| Test Runner (Rust) | `cargo test` | 15/15 passing |
+| Test Runner (Rust) | `cargo test` | 18/18 passing |
 | Test Runner (Python) | pytest 9.0.2 via uv venv | 29/29 passing |
 
 ### Benchmark Latency Summary
@@ -145,7 +149,7 @@ No bugs were found requiring fixes. All tests passed on first run after the `inc
 ## Ready for Next Stage?
 - [x] All deliverables complete
 - [x] Judge validation passed (5.00/5)
-- [x] 44 unit tests passing (15 Rust + 29 Python)
+- [x] 47 unit tests passing (18 Rust + 29 Python)
 - [x] 13/13 E2E tests passing
 - [x] Both tracks validated against all 5 benchmark problems
 

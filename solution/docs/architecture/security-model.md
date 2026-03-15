@@ -1,6 +1,15 @@
 # Security Model
 
-This is a single-user CLI tool that processes local JSON files. There is no network communication, no authentication, no multi-tenancy, and no user-supplied code execution.
+This is a single-user CLI tool that processes local JSON files. Track A (Rust
+binary) has no network communication, no authentication, no multi-tenancy, and
+no user-supplied code execution.
+
+Track B (Python agent) makes HTTPS calls to the Gemini API
+(`generativelanguage.googleapis.com`) when a `GOOGLE_API_KEY` environment
+variable is set. No problem data or solution JSON is logged or persisted by the
+API client beyond the scope of a single agent run. When `GOOGLE_API_KEY` is set
+to `dummy` or omitted, the agent runs in local-only mode with zero network
+traffic.
 
 ## Threat Model
 
@@ -9,7 +18,7 @@ This is a single-user CLI tool that processes local JSON files. There is no netw
 | Injection attacks (SQL, command) | No | No database, no shell commands |
 | Malicious input JSON | Low risk | JSON parser handles untrusted input safely; no `eval()` |
 | Denial of service | Not applicable | Single-user local tool |
-| Data exfiltration | Not applicable | No network, no secrets |
+| Data exfiltration | Track B only | HTTPS to Gemini API; no credentials stored; `GOOGLE_API_KEY` read from environment only |
 | Path traversal | Low risk | CLI accepts file paths; use `std::fs::canonicalize()` for safety |
 
 ## Input Validation
@@ -21,4 +30,9 @@ This is a single-user CLI tool that processes local JSON files. There is no netw
 
 ## No Secrets
 
-This project contains no API keys, passwords, tokens, or credentials. The `.env` file pattern is not applicable.
+Track A contains no API keys, passwords, tokens, or credentials. The `.env` file
+pattern is not applicable for the Rust binary.
+
+Track B reads `GOOGLE_API_KEY` from the environment at runtime. This key is never
+written to disk, never logged, and never embedded in source code. The agent falls
+back to local-only mode if the key is absent or set to `dummy`.
