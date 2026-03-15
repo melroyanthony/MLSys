@@ -26,7 +26,6 @@ from evaluator import (
     get_graph_outputs,
     topological_sort,
     _boundary_outputs_for_subgraph,
-    _get_problem_info,
     _k_full_for_op,
     _output_tensor_for_subgraph,
 )
