@@ -532,7 +532,7 @@ def compute_subgraph_latency(
         op = problem.ops[op_idx]
         if op.op_type == "MatMul":
             k_full_op = _k_full_for_op(op, problem)
-            cost_per_step = op.base_cost * (k / k_full_op)
+            cost_per_step = op.base_cost * (min(k, k_full_op) / k_full_op)
             matmul_compute_per_step += cost_per_step
         else:
             pointwise_compute += op.base_cost
@@ -668,12 +668,11 @@ def compute_subgraph_latency(
 
                 per_tile_lat = 0.0
                 prev_end = 0
-                total_k_steps = num_k_steps
 
                 for phase_idx, phase_end in enumerate(step_ends):
                     # Active MatMuls: those whose step count >= phase_end.
                     active_compute = sum(
-                        bc * (k / kf)
+                        bc * (min(k, kf) / kf)
                         for kf, bc, _ in matmul_phase_info
                         if math.ceil(kf / k) >= phase_end
                     )
@@ -703,7 +702,7 @@ def compute_subgraph_latency(
 
                     if has_first:
                         mem = full_load_lhs_time + pw_load_per_tile + active_k_strip
-                        # The first step is also the last only when total_k_steps == 1,
+                        # The first step is also the last only when num_k_steps == 1,
                         # but that case is handled by the all_same_k_full branch above.
                         per_tile_lat += max(active_compute, mem)
 
@@ -842,7 +841,7 @@ def compute_subgraph_latency(
 
             # For mixed-K: only MatMuls that haven't finished yet contribute compute.
             active_matmul_compute = sum(
-                bc * (k / kf)
+                bc * (min(k, kf) / kf)
                 for kf, bc, _ in matmul_phase_info
                 if k_step < math.ceil(kf / k)
             )

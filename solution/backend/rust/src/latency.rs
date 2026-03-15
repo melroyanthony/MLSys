@@ -29,7 +29,7 @@ pub fn matmul_compute_per_step(
         let op = &problem.ops[op_idx];
         if op.is_matmul() {
             let op_k_full = k_full_for_matmul(op, &problem.tensors) as f64;
-            total += op.base_cost as f64 * (k / op_k_full);
+            total += op.base_cost as f64 * (k.min(op_k_full) / op_k_full);
         }
     }
     total
@@ -429,7 +429,7 @@ pub fn subgraph_latency(
                 let active_compute: f64 = matmul_phases
                     .iter()
                     .filter(|(kf, _, _)| (*kf + k - 1) / k >= phase_end)
-                    .map(|(kf, cost, _)| cost * (k as f64 / *kf as f64))
+                    .map(|(kf, cost, _)| cost * ((k as f64).min(*kf as f64) / *kf as f64))
                     .sum();
 
                 // Active k_strip: sum per-op contributions for active MatMuls only.
