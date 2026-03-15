@@ -330,59 +330,56 @@ pub fn subgraph_latency(
         }
     }
 
-    let mut total_latency: f64 = 0.0;
+    // Closed-form latency for raster order (traversal_order == None).
+    // This replaces the O(tiles * k_steps) simulation loop with O(1) algebra.
+    if num_k_steps > 1 {
+        // Split-K mode: all spatial tiles are identical.
+        //
+        // First k-step of each spatial tile:
+        //   load = full_load_total + pw_load_total + k_strip_total
+        //   compute = matmul_compute
+        let first_k_mem = (full_load_total + pw_load_total + k_strip_total) as f64 / bw;
+        let first_k_lat = f64::max(matmul_compute, first_k_mem);
 
-    // For each spatial tile
-    for tile_idx in 0..num_spatial_tiles {
-        let tile_col = tile_idx % num_tiles_w;
-        let is_first_col = tile_col == 0;
+        // Interior k-steps (steps 2 .. num_k_steps-1):
+        //   load = k_strip_total only
+        //   compute = matmul_compute
+        let interior_k_lat = if num_k_steps > 2 {
+            let interior_mem = k_strip_total as f64 / bw;
+            f64::max(matmul_compute, interior_mem)
+        } else {
+            0.0
+        };
 
-        // For each k-step within this spatial tile
-        for k_step in 0..num_k_steps {
-            let is_first_k = k_step == 0;
-            let is_last_k = k_step == num_k_steps - 1;
+        // Last k-step of each spatial tile:
+        //   load = k_strip_total
+        //   evict = out_evict_size
+        //   compute = matmul_compute + pw_compute
+        let last_k_mem = (k_strip_total + plan.out_evict_size) as f64 / bw;
+        let last_k_lat = f64::max(matmul_compute + pw_compute, last_k_mem);
 
-            let mut load: i64 = 0;
+        // num_k_steps >= 2 here (outer branch guarantees it)
+        let per_tile_lat = first_k_lat + (num_k_steps - 2).max(0) as f64 * interior_k_lat + last_k_lat;
 
-            if num_k_steps > 1 {
-                // Split-K mode: full_load_inputs are loaded on first k-step of each spatial tile,
-                // then reused across k-steps. k_strip_inputs loaded every k-step.
-                // pw_load inputs loaded once per spatial tile (first k-step).
-                if is_first_k {
-                    load += full_load_total + pw_load_total;
-                }
-                load += k_strip_total;
-            } else {
-                // Spatial tiling only (no split-K):
-                // full_load tensors (upstream LHS row strips) reused across columns in same row.
-                // lhs_strip_total (final MatMul LHS) also reused across columns.
-                // Both treated as "row-reusable" in raster order.
-                // pw_load inputs loaded every spatial tile (no row-reuse).
-                if is_first_col {
-                    load += full_load_total + lhs_strip_total;
-                }
-                // rhs strips always loaded each column.
-                load += rhs_strip_total;
-                // Pointwise inputs loaded every tile (no reuse across columns)
-                load += pw_load_total;
-            }
+        num_spatial_tiles as f64 * per_tile_lat
+    } else {
+        // Spatial-only mode (num_k_steps == 1): row-reuse pattern.
+        // For each row of tiles (num_tiles_h rows, num_tiles_w columns):
+        //   First column: load full_load_total + lhs_strip_total + rhs_strip_total + pw_load_total
+        //   Other columns: load rhs_strip_total + pw_load_total
+        // All tiles evict out_evict_size (last k-step == only step).
+        //
+        // compute = matmul_compute + pw_compute (both run on the single step)
+        let compute = matmul_compute + pw_compute;
 
-            // Evict output on last k-step of each spatial tile
-            let evict = if is_last_k { plan.out_evict_size } else { 0 };
+        let first_col_mem = (full_load_total + lhs_strip_total + rhs_strip_total + pw_load_total + plan.out_evict_size) as f64 / bw;
+        let first_col_lat = f64::max(compute, first_col_mem);
 
-            // Pointwise ops execute only on the last k-step of each spatial tile.
-            let compute_step = if is_last_k {
-                matmul_compute + pw_compute
-            } else {
-                matmul_compute
-            };
+        let other_col_mem = (rhs_strip_total + pw_load_total + plan.out_evict_size) as f64 / bw;
+        let other_col_lat = f64::max(compute, other_col_mem);
 
-            let mem_time = (load + evict) as f64 / bw;
-            total_latency += f64::max(compute_step, mem_time);
-        }
+        num_tiles_h as f64 * (first_col_lat + (num_tiles_w - 1).max(0) as f64 * other_col_lat)
     }
-
-    total_latency
 }
 
 /// Wrapper that also handles pure pointwise subgraphs correctly.

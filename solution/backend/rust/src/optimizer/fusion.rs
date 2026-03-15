@@ -1,11 +1,14 @@
-/// Greedy bottom-up chain fusion.
+/// Greedy cost-based chain fusion.
 ///
 /// Merges adjacent ops (in topological order) into subgraphs where the
-/// merged working set fits in fast memory (with any valid granularity).
+/// merged working set fits in fast memory AND fusing reduces total latency
+/// compared to executing the two subgraphs separately with a DRAM round-trip
+/// at their boundary.
 
 use std::collections::HashSet;
 
 use crate::dag::DagInfo;
+use crate::latency::subgraph_latency;
 use crate::memory::find_split_k;
 use crate::models::{Granularity, Problem, SubgraphDef};
 use crate::parser::{k_full_for_matmul, native_granularity_for_subgraph};
@@ -63,14 +66,54 @@ pub fn greedy_fusion(
                 let k_full_consistent = matmul_k_fulls.is_empty()
                     || matmul_k_fulls.iter().all(|&kf| kf == matmul_k_fulls[0]);
 
-                if dims_consistent
-                    && k_full_consistent
-                    && find_feasible_granularity(&merged, &retained_before, problem, dag).is_some()
-                {
-                    new_groups.push(merged);
-                    i += 2;
-                    changed = true;
-                    continue;
+                if dims_consistent && k_full_consistent {
+                    if let Some(merged_gran) =
+                        find_feasible_granularity(&merged, &retained_before, problem, dag)
+                    {
+                        // Cost-based fusion decision: only merge if fusing reduces total latency.
+                        // Compare fused latency vs. (latency_a + latency_b + DRAM boundary cost).
+                        let lat_fused = subgraph_latency(
+                            &merged,
+                            &merged_gran,
+                            &[],
+                            &retained_before,
+                            problem,
+                            dag,
+                        );
+
+                        // Individual granularities: use the first feasible one for each group.
+                        let gran_a = find_feasible_granularity(&groups[i], &retained_before, problem, dag)
+                            .unwrap_or_else(|| native_granularity_for_subgraph(&groups[i], problem));
+                        let gran_b = find_feasible_granularity(&groups[i + 1], &retained_before, problem, dag)
+                            .unwrap_or_else(|| native_granularity_for_subgraph(&groups[i + 1], problem));
+
+                        let lat_a = subgraph_latency(
+                            &groups[i],
+                            &gran_a,
+                            &[],
+                            &retained_before,
+                            problem,
+                            dag,
+                        );
+                        let lat_b = subgraph_latency(
+                            &groups[i + 1],
+                            &gran_b,
+                            &[],
+                            &retained_before,
+                            problem,
+                            dag,
+                        );
+
+                        let boundary_cost =
+                            compute_boundary_dram_cost(&groups[i], &groups[i + 1], problem, dag);
+
+                        if lat_fused < lat_a + lat_b + boundary_cost {
+                            new_groups.push(merged);
+                            i += 2;
+                            changed = true;
+                            continue;
+                        }
+                    }
                 }
             }
             new_groups.push(groups[i].clone());
@@ -98,6 +141,45 @@ pub fn greedy_fusion(
     }
 
     result
+}
+
+/// Compute the DRAM round-trip cost for tensors at the boundary between group A and group B.
+///
+/// The boundary tensors are those produced by ops in group_a and consumed by ops in group_b.
+/// Each must be fully materialized in DRAM (write from A + read into B), so cost = 2 * size / bw.
+fn compute_boundary_dram_cost(
+    group_a: &[usize],
+    group_b: &[usize],
+    problem: &Problem,
+    dag: &DagInfo,
+) -> f64 {
+    let op_set_a: HashSet<usize> = group_a.iter().copied().collect();
+    let op_set_b: HashSet<usize> = group_b.iter().copied().collect();
+    let bw = problem.slow_memory_bandwidth as f64;
+
+    let mut cost = 0.0;
+    let mut seen: HashSet<usize> = HashSet::new();
+
+    for &op_idx in group_a {
+        for &out_t in &problem.ops[op_idx].outputs {
+            if seen.contains(&out_t) {
+                continue;
+            }
+            // Is this tensor consumed by any op in group_b?
+            let consumed_by_b = dag.tensor_consumers[out_t]
+                .iter()
+                .any(|c| op_set_b.contains(c));
+            if consumed_by_b {
+                seen.insert(out_t);
+                let tensor = &problem.tensors[out_t];
+                let full_size = (tensor.width * tensor.height) as f64;
+                // Write from A + read into B
+                cost += 2.0 * full_size / bw;
+            }
+        }
+    }
+
+    cost
 }
 
 /// Find the smallest feasible granularity for a subgraph (any k that fits in memory).

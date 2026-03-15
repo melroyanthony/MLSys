@@ -443,9 +443,6 @@ def compute_subgraph_latency(
 
     is_split_k = num_k_steps > 1
 
-    # Build traversal sequence
-    tile_sequence = traversal_order if traversal_order is not None else list(range(num_spatial_tiles))
-
     # Split compute: MatMul cost paid every k-step; Pointwise cost only on last k-step.
     matmul_compute_per_step = 0.0
     pointwise_compute = 0.0
@@ -463,6 +460,86 @@ def compute_subgraph_latency(
     )
 
     bw = problem.slow_memory_bandwidth
+
+    # Pre-compute memory totals needed for both the fast path and the simulation path.
+
+    # LHS: sum of (h * K_full_lhs) for each non-retained LHS input.
+    # In split-K mode: loaded once per spatial tile (first k-step).
+    # In spatial-only mode: loaded once per tile-row.
+    lhs_load_per_row = sum(
+        (h * problem.tensors[t_idx].width) / bw
+        for t_idx in lhs_inputs
+        if t_idx not in retained_tensors
+    )
+
+    # RHS: k * w per k-step (split-K) OR k * w per new column (spatial-only).
+    rhs_load_per_step = sum(
+        (k * w) / bw
+        for t_idx in rhs_streamed_inputs
+        if t_idx not in retained_tensors
+    )
+
+    # Pointwise inputs: w * h per spatial tile (first k-step).
+    pw_load_per_tile = sum(
+        (w * h) / bw
+        for t_idx in pw_inputs
+        if t_idx not in retained_tensors
+    )
+
+    # Output eviction: w * h per spatial tile (last k-step), for non-retained outputs.
+    out_evict_per_tile = sum(
+        (w * h) / bw
+        for t_idx in boundary_outputs
+        if t_idx not in tensors_to_retain_after
+    )
+
+    # ------------------------------------------------------------------
+    # Fast path: closed-form for raster order (traversal_order is None).
+    # ------------------------------------------------------------------
+    if traversal_order is None:
+        if is_split_k:
+            # Split-K mode: all spatial tiles are identical.
+            # First k-step of each spatial tile:
+            #   mem = lhs_load_per_row + pw_load_per_tile + rhs_load_per_step
+            #   compute = matmul_compute_per_step
+            first_k_mem = lhs_load_per_row + pw_load_per_tile + rhs_load_per_step
+            first_k_lat = max(matmul_compute_per_step, first_k_mem)
+
+            # Interior k-steps: mem = rhs_load_per_step only
+            if num_k_steps > 2:
+                interior_mem = rhs_load_per_step
+                interior_k_lat = max(matmul_compute_per_step, interior_mem)
+            else:
+                interior_k_lat = 0.0
+
+            # Last k-step: mem = rhs_load_per_step + out_evict_per_tile
+            #              compute = matmul_compute_per_step + pointwise_compute
+            last_k_mem = rhs_load_per_step + out_evict_per_tile
+            last_k_lat = max(matmul_compute_per_step + pointwise_compute, last_k_mem)
+
+            per_tile_lat = first_k_lat + max(0, num_k_steps - 2) * interior_k_lat + last_k_lat
+            return num_spatial_tiles * per_tile_lat
+
+        else:
+            # Spatial-only mode (num_k_steps == 1): row-reuse pattern.
+            # First tile of each row: load lhs + rhs + pw, then evict output.
+            # Subsequent tiles: load rhs + pw, then evict output.
+            compute = matmul_compute_per_step + pointwise_compute
+
+            first_col_mem = lhs_load_per_row + rhs_load_per_step + pw_load_per_tile + out_evict_per_tile
+            first_col_lat = max(compute, first_col_mem)
+
+            other_col_mem = rhs_load_per_step + pw_load_per_tile + out_evict_per_tile
+            other_col_lat = max(compute, other_col_mem)
+
+            return num_tiles_h * (first_col_lat + max(0, num_tiles_w - 1) * other_col_lat)
+
+    # ------------------------------------------------------------------
+    # Simulation path: custom traversal order (e.g. snake).
+    # Tracks actual row/col residency for data-reuse accounting.
+    # ------------------------------------------------------------------
+    tile_sequence = traversal_order
+
     total_latency = 0.0
 
     # Track intra-subgraph residency for row/col strips.
@@ -483,11 +560,6 @@ def compute_subgraph_latency(
             mem_out = 0.0
 
             # ------- LHS tensors -------
-            # LHS is loaded as a row-strip (h × K_full(op)) per spatial-tile-row.
-            # It is reused across:
-            #   - All k-steps for the same spatial tile (split-K reuse)
-            #   - Consecutive tiles in the same row (row reuse)
-            # Cost is incurred once per unique tile_row encountered.
             if is_first_k:
                 for t_idx in lhs_inputs:
                     if t_idx in retained_tensors:
@@ -499,14 +571,11 @@ def compute_subgraph_latency(
 
             # ------- RHS tensors -------
             if is_split_k:
-                # Split-K: RHS streamed as k-strips per k-step (no col reuse between k-steps)
                 for t_idx in rhs_streamed_inputs:
                     if t_idx in retained_tensors:
                         continue
                     mem_in += (k * w) / bw
             else:
-                # Non-split-K: RHS as col-strips, with intra-subgraph col reuse.
-                # Col reuse: if previous tile was in the same column, RHS strip still resident.
                 if is_first_k:
                     for t_idx in rhs_streamed_inputs:
                         if t_idx in retained_tensors:
@@ -516,7 +585,6 @@ def compute_subgraph_latency(
                             resident_rhs[t_idx] = tile_col
 
             # ------- Pointwise inputs -------
-            # Loaded once per spatial tile (first k-step)
             if is_first_k:
                 for t_idx in pw_inputs:
                     if t_idx in retained_tensors:
@@ -524,19 +592,12 @@ def compute_subgraph_latency(
                     mem_in += (w * h) / bw
 
             # ------- Output eviction -------
-            # Non-retained outputs are evicted to slow memory.
-            # Retained outputs (tensors_to_retain_after) are NOT evicted.
-            # In split-K with spatial tiling: eviction at LAST k-step of EACH spatial tile
-            # (each spatial tile's accumulator is written out once it finishes all k-steps).
-            # In non-split-K: eviction at LAST k-step of EACH spatial tile.
             if is_last_k:
                 for t_idx in boundary_outputs:
                     if t_idx not in tensors_to_retain_after:
                         mem_out += (w * h) / bw
 
-            # Pointwise ops execute only on the last k-step of each spatial tile.
             compute_this_step = matmul_compute_per_step + (pointwise_compute if is_last_k else 0.0)
-
             memory_time = mem_in + mem_out
             step_latency = max(compute_this_step, memory_time)
             total_latency += step_latency

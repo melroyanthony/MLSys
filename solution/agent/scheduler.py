@@ -197,6 +197,42 @@ def _find_safe_granularity(
 
 
 # ---------------------------------------------------------------------------
+# DRAM boundary cost helper
+# ---------------------------------------------------------------------------
+
+
+def _boundary_dram_cost(
+    ops_a: list[int],
+    ops_b: list[int],
+    problem: Problem,
+) -> float:
+    """
+    Compute the DRAM round-trip cost for tensors at the boundary between
+    two adjacent subgraphs.
+
+    Boundary tensors are those produced by ops_a and consumed by ops_b.
+    Each must be fully materialized in DRAM (write from A + read into B),
+    so cost = 2 * full_tensor_size / bandwidth.
+    """
+    produced_by_a: set[int] = set()
+    for op_idx in ops_a:
+        produced_by_a.update(problem.ops[op_idx].outputs)
+
+    consumed_by_b: set[int] = set()
+    for op_idx in ops_b:
+        consumed_by_b.update(problem.ops[op_idx].inputs)
+
+    boundary = produced_by_a & consumed_by_b
+    bw = problem.slow_memory_bandwidth
+
+    cost = 0.0
+    for t_idx in boundary:
+        t = problem.tensors[t_idx]
+        cost += 2.0 * (t.width * t.height) / bw
+    return cost
+
+
+# ---------------------------------------------------------------------------
 # Full greedy optimization pipeline
 # ---------------------------------------------------------------------------
 
@@ -221,10 +257,11 @@ def optimize(problem: Problem) -> Solution:
     sg_ops: list[list[int]] = [[op_idx] for op_idx in topo_order]
 
     # ------------------------------------------------------------------ #
-    # Step 2: Greedy forward fusion                                        #
+    # Step 2: Greedy cost-based forward fusion                             #
     # ------------------------------------------------------------------ #
-    # We merge sg[i] and sg[i+1] if the merged subgraph fits in memory
-    # at native granularity (we relax granularity later).
+    # We merge sg[i] and sg[i+1] if:
+    #   1. The merged subgraph fits in memory (with some valid granularity).
+    #   2. lat_fused < lat_a + lat_b + dram_boundary_cost
     changed = True
     while changed:
         changed = False
@@ -233,31 +270,57 @@ def optimize(problem: Problem) -> Solution:
         while i < len(sg_ops):
             if i + 1 < len(sg_ops):
                 merged = sg_ops[i] + sg_ops[i + 1]
-                # Check with native granularity (conservative)
-                matmul_in_merged = [o for o in merged
-                                    if problem.ops[o].op_type == "MatMul"]
-                if matmul_in_merged:
-                    k_full = _k_full_for_op(
-                        problem.ops[matmul_in_merged[0]], problem
+
+                # Find a feasible granularity for the merged subgraph.
+                g_merged = _find_safe_granularity(merged, problem, set())
+                if g_merged is None:
+                    # Try just split-k with native spatial dims.
+                    matmul_in_merged = [o for o in merged
+                                        if problem.ops[o].op_type == "MatMul"]
+                    if matmul_in_merged:
+                        k_full = _k_full_for_op(
+                            problem.ops[matmul_in_merged[0]], problem
+                        )
+                    else:
+                        k_full = 1
+                    g_native = Granularity(native_w, native_h, k_full)
+                    g_merged = _find_safe_k(merged, g_native, problem, set())
+
+                if g_merged is not None:
+                    # Cost comparison: fused vs. separate + DRAM boundary.
+                    lat_fused = compute_subgraph_latency(
+                        merged, g_merged, problem, set(), tensors_to_retain_after=set()
                     )
-                else:
-                    k_full = 1
-                g_native = Granularity(native_w, native_h, k_full)
 
-                # Try full native first, then split-k
-                if check_oom(merged, g_native, problem):
-                    new_sg_ops.append(merged)
-                    i += 2
-                    changed = True
-                    continue
+                    g_a = _find_safe_granularity(sg_ops[i], problem, set())
+                    if g_a is None:
+                        matmul_in_a = [o for o in sg_ops[i]
+                                       if problem.ops[o].op_type == "MatMul"]
+                        k_full_a = _k_full_for_op(problem.ops[matmul_in_a[0]], problem) \
+                            if matmul_in_a else 1
+                        g_a = Granularity(native_w, native_h, k_full_a)
 
-                # Try with split-k
-                g_reduced = _find_safe_k(merged, g_native, problem, set())
-                if g_reduced is not None:
-                    new_sg_ops.append(merged)
-                    i += 2
-                    changed = True
-                    continue
+                    g_b = _find_safe_granularity(sg_ops[i + 1], problem, set())
+                    if g_b is None:
+                        matmul_in_b = [o for o in sg_ops[i + 1]
+                                       if problem.ops[o].op_type == "MatMul"]
+                        k_full_b = _k_full_for_op(problem.ops[matmul_in_b[0]], problem) \
+                            if matmul_in_b else 1
+                        g_b = Granularity(native_w, native_h, k_full_b)
+
+                    lat_a = compute_subgraph_latency(
+                        sg_ops[i], g_a, problem, set(), tensors_to_retain_after=set()
+                    )
+                    lat_b = compute_subgraph_latency(
+                        sg_ops[i + 1], g_b, problem, set(), tensors_to_retain_after=set()
+                    )
+                    boundary_cost = _boundary_dram_cost(sg_ops[i], sg_ops[i + 1], problem)
+
+                    if lat_fused < lat_a + lat_b + boundary_cost:
+                        new_sg_ops.append(merged)
+                        i += 2
+                        changed = True
+                        continue
 
             new_sg_ops.append(sg_ops[i])
             i += 1
