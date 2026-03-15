@@ -36,11 +36,15 @@ total_latency = num_rows * (
 )
 ```
 
-Where each tile latency is itself a sum over k-steps, but since all k-steps within the same tile type have the same cost (except the last k-step which includes Pointwise compute and output eviction), this further simplifies to:
+Where each tile latency is itself a sum over k-steps. In split-K, the first k-step differs from interior k-steps (it includes full-load + Pointwise input loads), so the per-tile formula distinguishes three k-step types:
 
 ```
-tile_latency = (num_k_steps - 1) * interior_k_step_latency + last_k_step_latency
+tile_latency = first_k_step_latency + max(0, num_k_steps - 2) * interior_k_step_latency + last_k_step_latency
 ```
+
+- **first_k_step**: loads full_load (LHS) + pw_load + k_strip; compute = matmul only
+- **interior_k_steps**: loads k_strip only; compute = matmul only
+- **last_k_step**: loads k_strip + evicts output; compute = matmul + pointwise
 
 Each `k_step_latency = max(compute_time, memory_time)` per the roofline model, using the same formulas as the simulation but computed once per tile type rather than per tile instance.
 
