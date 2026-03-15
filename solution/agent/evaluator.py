@@ -543,7 +543,7 @@ def compute_subgraph_latency(
     # Pre-compute memory totals needed for both the fast path and the simulation path.
 
     # full_load LHS (ephemeral-output MatMul): h * K_full, row-reusable.
-    full_load_per_row = sum(
+    full_load_lhs_time = sum(
         (h * problem.tensors[t_idx].width) / bw
         for t_idx in full_load_lhs
         if t_idx not in retained_tensors
@@ -595,7 +595,7 @@ def compute_subgraph_latency(
             # Split-K mode: all spatial tiles are identical (no row-reuse).
             # full_load LHS loaded once per tile. k_strip LHS + RHS loaded every k-step.
             # First k-step: full_load + pw_load + k_strip_total
-            first_k_mem = full_load_per_row + pw_load_per_tile + k_strip_total_per_step
+            first_k_mem = full_load_lhs_time + pw_load_per_tile + k_strip_total_per_step
             first_k_lat = max(matmul_compute_per_step, first_k_mem)
 
             # Interior k-steps: k_strip_total only
@@ -620,7 +620,7 @@ def compute_subgraph_latency(
             # Per-column RHS load (not row-reusable)
             rhs_per_col = rhs_std_per_step + rhs_eph_per_step
 
-            first_col_mem = (full_load_per_row + k_strip_lhs_per_step
+            first_col_mem = (full_load_lhs_time + k_strip_lhs_per_step
                              + rhs_per_col + pw_load_per_tile + out_evict_per_tile)
             first_col_lat = max(compute, first_col_mem)
 
