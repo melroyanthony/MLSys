@@ -61,7 +61,7 @@ The closed-form computation must produce **exactly the same numerical result** a
 - Simpler reasoning about performance: search time depends only on the number of candidates, not on tensor dimensions
 
 ### Negative
-- Two code paths (closed-form for search, simulation for final evaluation) could diverge if the latency model changes
+- Two code paths (closed-form for raster order, simulation for snake/custom traversal) could diverge if the latency model changes
 - Closed-form derivation requires careful accounting of edge cases (single-column subgraphs, single k-step, Pointwise-only subgraphs)
 
 ### Mitigations
