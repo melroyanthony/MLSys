@@ -155,6 +155,10 @@ fn build_memory_plan(
             && !dag.tensor_consumers[out_t].is_empty()
             && dag.tensor_consumers[out_t].iter().all(|c| op_set.contains(c));
 
+        // Effective k for this op: clamp to its K_full (can't load more than exists)
+        let op_k_full = k_full_for_matmul(op, &problem.tensors);
+        let k_eff = k.min(op_k_full);
+
         // LHS input
         let lhs_boundary = !dag.tensor_producer[lhs_idx]
             .map(|p| op_set.contains(&p))
@@ -164,15 +168,13 @@ fn build_memory_plan(
             if previously_retained.contains(&lhs_idx) {
                 pre_retained.push(lhs_idx);
             } else if output_ephemeral {
-                // Upstream LHS: we need a ROW STRIP = h rows * full K_full_Op0 width
-                // h = output height of the FINAL output (the subgraph output)
-                // K_full_Op0 = lhs.width (the full reduction dimension of this upstream op)
+                // Upstream LHS: ROW STRIP = h * K_full (full reduction width)
                 let lhs_width = problem.tensors[lhs_idx].width;
                 let row_strip_size = h * lhs_width;
                 full_load.push((lhs_idx, row_strip_size));
             } else {
-                // Standard LHS slice = h * k
-                k_strip.push((lhs_idx, h * k));
+                // Standard LHS slice = h * k_eff
+                k_strip.push((lhs_idx, h * k_eff));
             }
         }
 
@@ -185,13 +187,12 @@ fn build_memory_plan(
             if previously_retained.contains(&rhs_idx) {
                 pre_retained.push(rhs_idx);
             } else if output_ephemeral {
-                // Upstream RHS: col strip of the intermediate = K_full_Op0 * k
-                // = rhs.height * k (since rhs.height = K_full_Op0 for this upstream op)
+                // Upstream RHS: rhs.height * k_eff
                 let rhs_height = problem.tensors[rhs_idx].height;
-                k_strip.push((rhs_idx, rhs_height * k));
+                k_strip.push((rhs_idx, rhs_height * k_eff));
             } else {
-                // Standard RHS slice = k * w
-                k_strip.push((rhs_idx, k * w));
+                // Standard RHS slice = k_eff * w
+                k_strip.push((rhs_idx, k_eff * w));
             }
         }
     }

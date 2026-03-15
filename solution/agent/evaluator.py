@@ -579,9 +579,10 @@ def compute_subgraph_latency(
 
     # Per-MatMul k_strip contribution and per-tensor active-step-count for mixed-K.
     # Each MatMul op contributes k_strip from its boundary inputs that are not retained:
-    #   - non-ephemeral LHS (in k_strip_lhs): h * k / bw
-    #   - non-ephemeral RHS (in rhs_standard): k * w / bw
-    #   - ephemeral RHS (in rhs_ephemeral): rhs.height * k / bw
+    #   - non-ephemeral LHS (in k_strip_lhs): h * k_eff / bw
+    #   - non-ephemeral RHS (in rhs_standard): k_eff * w / bw
+    #   - ephemeral RHS (in rhs_ephemeral): rhs.height * k_eff / bw
+    #   where k_eff = min(k, K_full_op) for each MatMul
     # Deduplication mirrors _categorize_inputs (a tensor counted once for its first op).
     #
     # matmul_phase_info: list of (k_full, base_cost, k_strip_contribution_per_step)

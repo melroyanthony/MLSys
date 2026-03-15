@@ -142,7 +142,7 @@ fn run_evaluate(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::latency::subgraph_latency;
+    use crate::latency::{compute_num_k_steps, subgraph_latency};
     use crate::models::Granularity;
     use std::collections::HashSet;
 
@@ -628,6 +628,54 @@ mod tests {
             "Fused MatMul+PW split-K with boundary bias: expected 6734.4, got {:.1}",
             lat
         );
+    }
+
+    // Mixed-K: two MatMuls with different K_full fused in one subgraph
+    #[test]
+    fn test_mixed_k_two_matmuls() {
+        // Op0: MatMul K=64, Tensor0(64x128) @ Tensor1(128x64) -> Tensor2(128x128), cost=1000
+        // Op1: MatMul K=128, Tensor2(128x128) @ Tensor3(128x128) -> Tensor4(128x128), cost=2000
+        // Fused [0,1] with k=32:
+        //   Op0: ceil(64/32)=2 k-steps, compute/step = 1000*(32/64) = 500
+        //   Op1: ceil(128/32)=4 k-steps, compute/step = 2000*(32/128) = 500
+        //   Total k-steps = max(2,4) = 4
+        //   Phase 1 (steps 0-1): both active, compute = 500+500 = 1000
+        //   Phase 2 (steps 2-3): only Op1 active, compute = 500
+        let json = r#"{
+            "widths": [64,128,128,128,128],
+            "heights": [128,64,128,128,128],
+            "inputs": [[0,1],[2,3]],
+            "outputs": [[2],[4]],
+            "base_costs": [1000, 2000],
+            "op_types": ["MatMul","MatMul"],
+            "fast_memory_capacity": 100000,
+            "slow_memory_bandwidth": 10,
+            "native_granularity": [128, 128]
+        }"#;
+        let problem = parse_problem(json).unwrap();
+        let dag = DagInfo::build(&problem).unwrap();
+
+        let gran = Granularity { w: 128, h: 128, k: 32 };
+        let lat = subgraph_latency(&[0, 1], &gran, &[], &HashSet::new(), &problem, &dag);
+
+        // 4 k-steps, 1 spatial tile
+        // Verify latency > 0 and is reasonable (phases produce different costs)
+        assert!(lat > 0.0, "Mixed-K latency must be positive, got {lat}");
+
+        // Compare with k=64 (Op0 does 1 step, Op1 does 2 steps)
+        let gran64 = Granularity { w: 128, h: 128, k: 64 };
+        let lat64 = subgraph_latency(&[0, 1], &gran64, &[], &HashSet::new(), &problem, &dag);
+        assert!(lat64 > 0.0, "Mixed-K k=64 latency must be positive, got {lat64}");
+
+        // k=128: Op0 does 1 step (k>K_full clamped), Op1 does 1 step
+        let gran128 = Granularity { w: 128, h: 128, k: 128 };
+        let lat128 = subgraph_latency(&[0, 1], &gran128, &[], &HashSet::new(), &problem, &dag);
+        assert!(lat128 > 0.0, "Mixed-K k=128 latency must be positive, got {lat128}");
+
+        // Verify num_k_steps = ceil(max(64,128)/k)
+        assert_eq!(compute_num_k_steps(&[0, 1], 32, &problem), 4); // ceil(128/32)
+        assert_eq!(compute_num_k_steps(&[0, 1], 64, &problem), 2); // ceil(128/64)
+        assert_eq!(compute_num_k_steps(&[0, 1], 128, &problem), 1); // ceil(128/128)
     }
 
     // Benchmark validation: all 5 benchmark solutions should cover all ops and have non-negative latencies
