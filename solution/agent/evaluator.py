@@ -589,6 +589,7 @@ def compute_subgraph_latency(
     #   Used in the simulation path to load k_strip inputs only while their op is active.
     matmul_phase_info: list[tuple[int, float, float]] = []
     k_strip_tensor_active_steps: dict[int, int] = {}
+    k_strip_tensor_k_eff: dict[int, int] = {}  # tensor_id -> min(k, K_full_op)
     _seen_k_strip: set[int] = set()
     for op_idx in subgraph_ops:
         op = problem.ops[op_idx]
@@ -596,24 +597,28 @@ def compute_subgraph_latency(
             continue
         k_full_op = _k_full_for_op(op, problem)
         op_steps = math.ceil(k_full_op / k)
+        k_eff = min(k, k_full_op)  # clamp k to this op's K_full
         lhs_idx = op.inputs[0]
         rhs_idx = op.inputs[1]
         op_k_strip = 0.0
         if lhs_idx in k_strip_lhs and lhs_idx not in _seen_k_strip:
             _seen_k_strip.add(lhs_idx)
             if lhs_idx not in retained_tensors:
-                op_k_strip += (h * k) / bw
+                op_k_strip += (h * k_eff) / bw
                 k_strip_tensor_active_steps[lhs_idx] = op_steps
+                k_strip_tensor_k_eff[lhs_idx] = k_eff
         if rhs_idx in rhs_standard and rhs_idx not in _seen_k_strip:
             _seen_k_strip.add(rhs_idx)
             if rhs_idx not in retained_tensors:
-                op_k_strip += (k * w) / bw
+                op_k_strip += (k_eff * w) / bw
                 k_strip_tensor_active_steps[rhs_idx] = op_steps
+                k_strip_tensor_k_eff[rhs_idx] = k_eff
         if rhs_idx in rhs_ephemeral and rhs_idx not in _seen_k_strip:
             _seen_k_strip.add(rhs_idx)
             if rhs_idx not in retained_tensors:
-                op_k_strip += (problem.tensors[rhs_idx].height * k) / bw
+                op_k_strip += (problem.tensors[rhs_idx].height * k_eff) / bw
                 k_strip_tensor_active_steps[rhs_idx] = op_steps
+                k_strip_tensor_k_eff[rhs_idx] = k_eff
         matmul_phase_info.append((k_full_op, op.base_cost, op_k_strip))
 
     # Pointwise inputs: w * h per spatial tile (first k-step).
@@ -794,12 +799,12 @@ def compute_subgraph_latency(
             for t_idx in k_strip_lhs:
                 if t_idx in retained_tensors:
                     continue
+                ke = k_strip_tensor_k_eff.get(t_idx, k)
                 if is_split_k:
-                    # Only load if the owning MatMul is still active this step.
                     if k_step < k_strip_tensor_active_steps.get(t_idx, num_k_steps):
-                        mem_in += (h * k) / bw
+                        mem_in += (h * ke) / bw
                 elif is_first_k and resident_k_strip_lhs[t_idx] != tile_row:
-                    mem_in += (h * k) / bw
+                    mem_in += (h * ke) / bw
                     resident_k_strip_lhs[t_idx] = tile_row
 
             # ------- RHS tensors -------
@@ -810,20 +815,22 @@ def compute_subgraph_latency(
                     # Only load if the owning MatMul is still active this step.
                     if k_step >= k_strip_tensor_active_steps.get(t_idx, num_k_steps):
                         continue
+                    ke = k_strip_tensor_k_eff.get(t_idx, k)
                     if t_idx in rhs_ephemeral:
-                        mem_in += (problem.tensors[t_idx].height * k) / bw
+                        mem_in += (problem.tensors[t_idx].height * ke) / bw
                     else:
-                        mem_in += (k * w) / bw
+                        mem_in += (ke * w) / bw
             else:
                 if is_first_k:
                     for t_idx in all_rhs:
                         if t_idx in retained_tensors:
                             continue
                         if resident_rhs[t_idx] != tile_col:
+                            ke = k_strip_tensor_k_eff.get(t_idx, k)
                             if t_idx in rhs_ephemeral:
-                                mem_in += (problem.tensors[t_idx].height * k) / bw
+                                mem_in += (problem.tensors[t_idx].height * ke) / bw
                             else:
-                                mem_in += (k * w) / bw
+                                mem_in += (ke * w) / bw
                             resident_rhs[t_idx] = tile_col
 
             # ------- Pointwise inputs -------
