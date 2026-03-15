@@ -51,7 +51,7 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 | 6 | **F-11: Solution JSON serializer** | Writes well-formed JSON matching the output schema; round-trips through a JSON validator; `null` traversal_orders serialize correctly | 2 | none |
 | 7 | **F-04: Baseline scheduler** | Produces one valid subgraph per operation; uses native granularity `[128, 128, K_full]`; `tensors_to_retain = []` for all; latency values match model; no OOM on any benchmark | 2 | F-01, F-02, F-03, F-11, F-14 |
 | 8 | **F-12: Benchmark runner** | CLI that accepts `--problem FILE --solution FILE`, calls evaluate logic, prints total latency and pass/fail | 3 | F-01, F-11 |
-| 9 | **F-05: Op grouping / chain fusion** | Cost-based fusion: group adjacent ops only when fused latency is strictly less than `lat_a + lat_b` (which already includes boundary DRAM transfers); verify latency improves vs. baseline on all 5 benchmarks | 6 | F-14, F-03, F-02 |
+| 9 | **F-05: Op grouping / chain fusion** | Cost-based fusion: group adjacent ops only when fused latency is meaningfully less than `lat_a + lat_b` (relative tolerance to avoid float noise; boundary DRAM already included in individual latencies); verify latency improves vs. baseline on all 5 benchmarks | 6 | F-14, F-03, F-02 |
 | 10 | **F-07: Tensor retention** | After each subgraph, determine which output tensors are consumed by the immediately following subgraph and have sufficient residual capacity; retain them; verify improvement on Example 3C pattern | 4 | F-05, F-03 |
 | 11 | **F-08: Split-K** | For MatMul subgraphs where full-k working set exceeds capacity, search for the largest `k` divisor that fits; model accumulator as resident across k-steps; verify Example 5B latency | 5 | F-05, F-03, F-02 |
 | 12 | **F-06: Granularity search** | For each subgraph, try candidate `[w, h]` values (powers of 2 up to tensor dimensions); **for MatMul subgraphs, also search `k` from `K_full` down to 1 in powers of 2 (Issue #15 fix) -- k must not be hardcoded to 1**; use **closed-form latency evaluation** (ADR-005, Issue #16) instead of tile-by-tile simulation; select the `[w, h, k]` combination that minimizes subgraph latency within the OOM constraint; larger k values reduce the total number of k-steps and total memory reloads; verify Example 1C pattern and that k > 1 is chosen for MatMul ops where the memory budget allows | 8 | F-05, F-03, F-02 |
@@ -86,7 +86,8 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 
 ### Quality (Issue #16)
 - [ ] Fusion decisions are cost-based: merging two subgraphs only occurs when the fused latency
-  is strictly less than `lat_a + lat_b` (individual latencies already include boundary DRAM)
+  is meaningfully less than `lat_a + lat_b` (relative epsilon tolerance to avoid float noise;
+  individual latencies already include boundary DRAM)
 - [ ] No benchmark exhibits a latency regression from fusion (i.e., fusing never makes things
   worse than keeping subgraphs separate)
 
