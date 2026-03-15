@@ -180,6 +180,8 @@ Note: `latency(A)` already includes evicting boundary outputs to DRAM, and `late
 
 This prevents harmful fusions where forcing a shared granularity degrades latency more than the DRAM savings from making intermediates ephemeral.
 
+**Mixed-K fusion (Issue #22):** The fusion stage no longer rejects merges between ops with different K_full values. MatMuls with different reduction dimensions can coexist in the same subgraph. The cost-based criterion remains the gatekeeper: a mixed-K fusion is accepted only when the fused latency (computed under the mixed-K execution model) is lower than the split latency. See "Mixed-K Execution Model" below for how the latency is computed.
+
 ### Stage 7: Granularity Search -- Full (w, h, k) Search
 
 The granularity search explores a three-dimensional candidate space for each subgraph:
@@ -188,10 +190,10 @@ The granularity search explores a three-dimensional candidate space for each sub
 ```
 w candidates: powers of 2 from 1 up to output_width
 h candidates: powers of 2 from 1 up to output_height
-k candidates: K_cap, K_cap/2, K_cap/4, ..., 1  (powers of 2, descending)
+k candidates: K_max, K_max/2, K_max/4, ..., 1  (powers of 2, descending)
 ```
 
-Where `K_cap = K_full` (the shared reduction dimension across all MatMuls in the subgraph). **Invariant: all MatMul ops within a single subgraph must share the same K_full.** This invariant is enforced during fusion (ops with different K_full are not merged) and validated during evaluation. It ensures the subgraph has a single, well-defined k-step loop. For Pointwise-only subgraphs, k is fixed at 1 and only (w, h) is searched.
+Where `K_max = max(K_full_op for each MatMul op in the subgraph)`. **Mixed-K subgraphs are permitted (Issue #22):** MatMul ops within a single subgraph may have different K_full values. Each MatMul individually requires `ceil(K_full_op / k)` k-steps, and the subgraph runs for `ceil(K_max / k)` total k-steps (driven by the MatMul with the largest reduction dimension). MatMuls that finish their reduction before the final k-step contribute zero compute and zero memory traffic on remaining steps. For Pointwise-only subgraphs, k is fixed at 1 and only (w, h) is searched.
 
 **For each (w, h, k) candidate:**
 1. Compute the working set (input slices + output slices + retained tensors)
@@ -212,10 +214,10 @@ Instead of iterating over every tile and k-step to sum per-step roofline costs (
 ```
 num_rows = ceil(H_out / h)
 num_cols = ceil(W_out / w)
-num_k_steps = ceil(K_full / k)
+num_k_steps = ceil(K_max / k)   -- where K_max = max(K_full) across all MatMuls
 ```
 
-**Spatial-only** (num_k_steps == 1) — row-reuse applies:
+**Spatial-only** (num_k_steps == 1) -- row-reuse applies:
 
 ```
 first_col_latency = max(compute, (full_load + k_strip_lhs + rhs + pw + evict) / bw)
@@ -223,8 +225,9 @@ other_col_latency = max(compute, (rhs + pw + evict) / bw)
 total_latency = num_rows * (first_col_latency + (num_cols - 1) * other_col_latency)
 ```
 
-**Split-K** (num_k_steps > 1) — all tiles identical, no row-reuse:
+**Split-K / Mixed-K** (num_k_steps > 1) -- per-step compute and memory vary by step:
 
+For **uniform-K subgraphs** (all MatMuls share the same K_full), the formula remains:
 ```
 first_k  = max(matmul_compute, (full_load + pw_load + k_strip) / bw)
 interior = max(matmul_compute, k_strip / bw)
@@ -233,17 +236,93 @@ per_tile = first_k + max(0, num_k_steps - 2) * interior + last_k
 total_latency = num_spatial_tiles * per_tile
 ```
 
+For **mixed-K subgraphs** (MatMuls with different K_full values), the per-step cost varies because some MatMuls finish their reduction before others. The execution has distinct phases:
+
+```
+K_full values (sorted descending): K1 >= K2 >= ... >= Kn
+num_k_steps_i = ceil(Ki / k)   -- steps for MatMul i
+num_k_steps   = max(num_k_steps_i) = ceil(K1 / k)  -- total subgraph steps
+
+Phase boundaries occur at each distinct num_k_steps_i value.
+Within each phase, the set of active MatMuls is constant.
+
+For step_idx in 0..num_k_steps:
+    active_matmuls = { op | step_idx < ceil(K_full_op / k) }
+    matmul_compute = sum(op.base_cost * (k / K_full_op) for op in active_matmuls)
+    matmul_memory  = sum(k_strip_sizes for op in active_matmuls)
+
+    if step_idx == num_k_steps - 1:  -- last step
+        compute = matmul_compute + pw_compute
+        memory includes eviction
+    else:
+        compute = matmul_compute
+
+    step_latency = max(compute, memory / bw)
+```
+
+The closed-form optimization groups consecutive steps with the same set of active MatMuls into phases, computing each phase's contribution in O(1). The total number of phases equals the number of distinct K_full values, so the per-candidate cost is O(distinct_K_values) rather than O(num_k_steps).
+
 For **Pointwise-only subgraphs** (num_k_steps = 1, no MatMul reuse patterns), the formula simplifies to `num_tiles * max(compute, memory)` since all tiles are identical.
 
-This reduces candidate evaluation from O(tiles * k_steps) to O(1), making the entire granularity search O(candidates) where candidates = O(log W * log H * log K_full).
+This reduces candidate evaluation from O(tiles * k_steps) to O(1) for uniform-K and O(distinct_K) for mixed-K, making the entire granularity search O(candidates) where candidates = O(log W * log H * log K_max).
 
-**Search complexity:** For a subgraph with output dimensions W x H and reduction K_full:
+**Search complexity:** For a subgraph with output dimensions W x H and reduction K_max:
 - w candidates: O(log W)
 - h candidates: O(log H)
-- k candidates: O(log K_full)
-- Total: O(log W * log H * log K_full) candidates per subgraph
-- Each candidate evaluation is O(1) via closed-form
+- k candidates: O(log K_max)
+- Total: O(log W * log H * log K_max) candidates per subgraph
+- Each candidate evaluation is O(1) for uniform-K or O(distinct_K) for mixed-K via closed-form
 - Total search time remains well under 100 milliseconds for all benchmarks
+
+---
+
+## Mixed-K Execution Model (Issue #22 / ADR-006)
+
+When a subgraph contains MatMul ops with different K_full values, the subgraph uses a **mixed-K execution model**. This section describes the semantics precisely.
+
+### Motivation
+
+The previous design enforced a K_full consistency invariant: all MatMuls in a subgraph had to share the same K_full. This was more restrictive than the problem statement requires. The problem says each MatMul individually processes its dot product in `ceil(K_full_op / k)` k-steps. Different MatMuls can have different K_full values in the same subgraph.
+
+The K_full consistency constraint prevented fusing adjacent MatMul+Pointwise chains when the MatMuls had different reduction dimensions (e.g., K=1024 and K=4096). This created unnecessary DRAM boundaries between subgraphs, accounting for approximately 30% of total latency on benchmarks 1 and 9.
+
+### Execution Semantics
+
+For a subgraph with granularity (w, h, k) containing MatMuls with K_full values {K1, K2, ..., Kn}:
+
+```
+K_max = max(K1, K2, ..., Kn)
+num_k_steps = ceil(K_max / k)
+```
+
+For each spatial tile, the subgraph runs `num_k_steps` k-steps:
+
+| Step Index | Active MatMuls | Compute | Memory |
+|------------|---------------|---------|--------|
+| 0 .. ceil(Ki/k)-1 | MatMul_i is active | base_cost_i * (k / Ki) | Load LHS/RHS strips for MatMul_i |
+| ceil(Ki/k) .. num_k_steps-1 | MatMul_i is **inactive** | 0 | 0 (no strips loaded) |
+| num_k_steps - 1 (last) | All remaining active MatMuls + all Pointwise ops | matmul_compute + pw_compute | strips + eviction |
+
+**Key properties:**
+- A MatMul that has completed all its k-steps (i.e., `step_idx >= ceil(K_full_op / k)`) contributes **zero compute and zero memory** on subsequent steps
+- Pointwise ops execute only on the **last k-step** (step `num_k_steps - 1`), as in the uniform-K case
+- The working-set OOM check uses the **worst-case step** (typically step 0, when all MatMuls are active and all input strips must be loaded)
+
+### Example
+
+Subgraph with two MatMuls (K_full=1024 and K_full=4096) and one Pointwise, k=128:
+
+```
+MatMul_A: K_full=1024, num_k_steps_A = ceil(1024/128) = 8
+MatMul_B: K_full=4096, num_k_steps_B = ceil(4096/128) = 32
+Subgraph num_k_steps = max(8, 32) = 32
+
+Steps 0-7:   MatMul_A active (compute + memory), MatMul_B active (compute + memory)
+Steps 8-30:  MatMul_A done (0 cost), MatMul_B active (compute + memory)
+Step 31:     MatMul_B active + Pointwise executes + eviction
+```
+
+On steps 8-30, the memory working set is smaller because MatMul_A's input strips are no longer loaded.
 
 ---
 
@@ -258,9 +337,11 @@ The latency model implements the roofline evaluation described in PROBLEM.md and
 - `num_tiles_h = ceil(H_out / h)` -- number of spatial tiles along height
 - `num_spatial_tiles = num_tiles_w * num_tiles_h`
 
-**K-Steps (Split-K)**: For MatMul with reduction dimension `K_full`:
-- `num_k_steps = ceil(K_full / k)`
-- For Pointwise: `num_k_steps = 1` (k is ignored)
+**K-Steps (Split-K / Mixed-K)**: For a subgraph containing MatMul ops:
+- Each MatMul op has its own K_full: `num_k_steps_op = ceil(K_full_op / k)`
+- The subgraph runs for `num_k_steps = ceil(max(K_full) / k)` total k-steps
+- A MatMul op is **active** on step `s` if `s < ceil(K_full_op / k)`, otherwise it contributes nothing
+- For Pointwise-only subgraphs: `num_k_steps = 1` (k is ignored)
 
 **Total Iterations**: `num_spatial_tiles * num_k_steps`
 
@@ -278,25 +359,26 @@ For each execution step (one spatial tile, one k-step):
 - When granularity equals native: `base_cost` is the cost per tile, and `num_spatial_tiles` tiles cover the full tensor
 - When granularity is smaller: `base_cost` is still the cost per tile (hardware pads), but more tiles are needed
 
-**Reduction scaling**: For MatMul, each k-step costs `base_cost * (k / K_full)` where `K_full` is the op's full reduction dimension. Verified against Example 5B: `k=32`, `K_full=128`, `base_cost=2000` per op, compute per step = `2000*(32/128) + 2000*(32/128) = 1000`.
+**Reduction scaling**: For MatMul, each k-step costs `base_cost * (k / K_full)` where `K_full` is the op's full reduction dimension, **but only on steps where the op is active** (i.e., `step_idx < ceil(K_full_op / k)`). On steps after the op has completed its reduction, it contributes zero compute. Verified against Example 5B: `k=32`, `K_full=128`, `base_cost=2000` per op, compute per step = `2000*(32/128) + 2000*(32/128) = 1000`.
 
-For Pointwise, k is irrelevant — the op executes **once per spatial tile** (on the last k-step only). In a fused subgraph with k-steps from a MatMul, Pointwise compute is added only on the final k-step of each spatial tile, not every step. Verified against Example 1C (pure Pointwise, no k-steps): `base_cost=1000+100=1100` per tile, 4 tiles.
+For Pointwise, k is irrelevant -- the op executes **once per spatial tile** (on the last k-step only). In a fused subgraph with k-steps from a MatMul, Pointwise compute is added only on the final k-step of each spatial tile, not every step. Verified against Example 1C (pure Pointwise, no k-steps): `base_cost=1000+100=1100` per tile, 4 tiles.
 
 **Spatial padding**: if `w < native_w` or `h < native_h`, you still pay full `base_cost` per step (hardware pads), but need more spatial tiles to cover the tensor.
 
-**Summary**:
+**Summary (mixed-K aware)**:
 ```
-For each k-step of a spatial tile:
-  matmul_compute = sum(op.base_cost * (k / K_full) for MatMul ops)
-  if is_last_k_step:
+For each k-step (step_idx) of a spatial tile:
+  active_matmuls = { op | op is MatMul AND step_idx < ceil(K_full_op / k) }
+  matmul_compute = sum(op.base_cost * (k / K_full_op) for op in active_matmuls)
+  if is_last_k_step:   -- step_idx == ceil(K_max / k) - 1
       compute = matmul_compute + sum(op.base_cost for Pointwise ops)
   else:
       compute = matmul_compute
 ```
 
-Where `K_full_for_this_op` is the inner/reduction dimension of that specific MatMul (the width of the LHS input = height of the RHS input... actually: for MatMul with inputs [LHS, RHS], `K_full = LHS.width = RHS.height`).
+Where `K_full_op` is the inner/reduction dimension of that specific MatMul (for MatMul with inputs [LHS, RHS], `K_full = LHS.width = RHS.height`).
 
-Actually, let me re-examine. From the granularity definition:
+From the granularity definition:
 - LHS input slice: width `k`, height `h`
 - RHS input slice: width `w`, height `k`
 - Output slice: width `w`, height `h`
@@ -312,6 +394,7 @@ For each execution step, we must account for data loaded from slow memory and da
   - Compute the slice size based on the op type and granularity
   - If the tensor is already resident in fast memory (retained from previous subgraph, or already loaded in a previous step of the same subgraph via intra-subgraph reuse) it costs 0
   - Otherwise: `slice_size / slow_memory_bandwidth`
+  - **Mixed-K rule (Issue #22)**: If the MatMul consuming this tensor is inactive on this step (has completed its reduction), the tensor's input strips are NOT loaded -- zero memory cost for that tensor on this step
 
 **Slice sizes** (for one spatial tile + one k-step):
 - Pointwise input: `w * h` elements
@@ -381,6 +464,8 @@ working_set = sum(slice_size for each boundary input and output tensor that must
             + sum(size of retained tensors from previous subgraphs)
 ```
 
+**Mixed-K working set note (Issue #22)**: The OOM check uses the **worst-case step**, which is typically step 0 when all MatMuls are active and all input strips must be loaded simultaneously. On later steps where some MatMuls have finished, the actual memory usage is lower, but the OOM constraint must be satisfied for the worst case.
+
 **OOM check**: `working_set <= fast_memory_capacity`
 
 ### Retained Tensors from Previous Subgraphs
@@ -444,23 +529,32 @@ num_spatial_tiles = num_tiles_w * num_tiles_h
 ### Number of K-Steps
 
 ```
-For MatMul: num_k_steps = ceil(K_full / k)
+For uniform-K subgraphs: num_k_steps = ceil(K_full / k)
+For mixed-K subgraphs:   num_k_steps = ceil(max(K_full_op for each MatMul) / k)
+Per-op active steps:      num_k_steps_op = ceil(K_full_op / k)
+                          op is active on step s if s < num_k_steps_op
 For Pointwise-only subgraphs: num_k_steps = 1
 ```
 
 ### Compute Cost Per Step
 
+For a given step_idx:
 ```
-compute_per_step = sum for each op in subgraph:
-    if MatMul: base_cost * min(k, K_full_remaining) / native_k
-    if Pointwise: base_cost
+active_matmuls = { op | op is MatMul AND step_idx < ceil(K_full_op / k) }
+matmul_compute = sum(op.base_cost * (k / K_full_op) for op in active_matmuls)
 ```
 
-Actually, let me be more precise. From the problem: "choosing k below native simply runs fewer cycles, dividing compute proportionally without waste." So for MatMul:
+On the last k-step (step_idx == num_k_steps - 1), add Pointwise compute:
 ```
-compute_per_matmul_step = base_cost * (k / K_full)
+compute = matmul_compute + sum(op.base_cost for Pointwise ops)
 ```
-where `K_full` is the full reduction dimension of that MatMul.
+
+On all other steps:
+```
+compute = matmul_compute
+```
+
+Note: from the problem statement, "choosing k below native simply runs fewer cycles, dividing compute proportionally without waste." For MatMul, `compute_per_matmul_step = base_cost * (k / K_full_op)` where `K_full_op` is the full reduction dimension of that specific MatMul.
 
 For the spatial dimensions, if `w < native_w` or `h < native_h`, you still pay `base_cost` (padded), but you need more tiles. The examples confirm this.
 
@@ -469,7 +563,7 @@ For the spatial dimensions, if `w < native_w` or `h < native_h`, you still pay `
 ```
 step_latency = max(compute_time, memory_time)
 where:
-    compute_time = sum of per-op compute costs for this step
+    compute_time = sum of per-op compute costs for active ops on this step
     memory_time = (bytes_in + bytes_out) / slow_memory_bandwidth
 ```
 
@@ -497,9 +591,10 @@ total_latency = sum(subgraph_latency for each subgraph)
 ## Performance Considerations
 
 1. **Rust zero-cost abstractions**: The scheduler performs integer arithmetic, comparisons, and vector operations. Rust compiles to native code with no garbage collection pauses.
-2. **Closed-form granularity evaluation (ADR-005)**: Candidate (w, h, k) triples are evaluated using a closed-form latency formula instead of tile-by-tile simulation. This reduces per-candidate evaluation from O(tiles * k_steps) to O(1). The search space remains O(log W * log H * log K) candidates per subgraph, with each evaluation being a constant-time arithmetic expression. See ADR-005 for the derivation and correctness argument.
+2. **Closed-form granularity evaluation (ADR-005)**: Candidate (w, h, k) triples are evaluated using a closed-form latency formula instead of tile-by-tile simulation. This reduces per-candidate evaluation from O(tiles * k_steps) to O(1) for uniform-K subgraphs and O(distinct_K) for mixed-K subgraphs. The search space remains O(log W * log H * log K) candidates per subgraph, with each evaluation being a constant-time (or near-constant) arithmetic expression. See ADR-005 for the derivation and correctness argument.
 3. **Early termination on OOM**: Before computing the closed-form latency for any candidate, the working set is checked against `fast_memory_capacity`. Infeasible candidates are pruned immediately, avoiding even the O(1) latency computation. For memory-constrained subgraphs, this eliminates the majority of the search space.
 4. **Cost-based fusion (Issue #16)**: Before merging two subgraphs, the optimizer compares `latency(fused, best_granularity)` against `latency(A, best_A) + latency(B, best_B)`. Individual latencies already include DRAM boundary transfers (eviction from A, loading into B), so no separate boundary cost is added. The cost comparison uses the same closed-form evaluator, so it adds negligible overhead.
-5. **Topological sort**: Kahn's algorithm, O(V + E), runs once.
-6. **Total optimizer complexity**: O(N^2) for fusion (N = number of ops, each candidate merge requires a cost comparison), O(G) for granularity search per subgraph (G = candidate granularities, each O(1)). All 5 benchmarks complete end-to-end in under 2 seconds.
-7. **Static binary**: `cargo build --release` with `lto = true` and `codegen-units = 1` produces a fully optimized, statically linked binary with no runtime dependencies.
+5. **Mixed-K fusion (Issue #22)**: Relaxing the K_full consistency constraint allows fusing ops that were previously forced into separate subgraphs. This eliminates DRAM boundary transfers between those subgraphs, improving latency by up to 30% on benchmarks with mixed reduction dimensions (benchmarks 1 and 9). The additional complexity in the closed-form evaluator (phased computation) is O(distinct_K) per candidate, which is negligible.
+6. **Topological sort**: Kahn's algorithm, O(V + E), runs once.
+7. **Total optimizer complexity**: O(N^2) for fusion (N = number of ops, each candidate merge requires a cost comparison), O(G) for granularity search per subgraph (G = candidate granularities, each O(1) or O(distinct_K)). All 5 benchmarks complete end-to-end in under 2 seconds.
+8. **Static binary**: `cargo build --release` with `lto = true` and `codegen-units = 1` produces a fully optimized, statically linked binary with no runtime dependencies.
