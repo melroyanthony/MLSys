@@ -339,17 +339,40 @@ pub fn subgraph_latency(
         // Mixed-K support: MatMuls with different K_full values finish at different steps.
         // We compute latency in phases where each phase has a different set of active MatMuls.
         //
-        // Collect (K_full, base_cost) pairs for all MatMul ops.
-        let matmul_phases: Vec<(i64, f64)> = subgraph_ops
+        // Build a lookup from tensor_id -> k_strip_size from the memory plan.
+        // Used to compute per-MatMul k_strip contributions accurately (no compute-ratio proxy).
+        let k_strip_map: std::collections::HashMap<usize, i64> =
+            plan.k_strip.iter().map(|&(t, sz)| (t, sz)).collect();
+
+        // Collect (K_full, base_cost, k_strip_contribution) tuples for all MatMul ops.
+        // k_strip_contribution is the sum of k_strip sizes for this op's boundary LHS/RHS
+        // inputs (using the same deduplication logic as build_memory_plan: each tensor
+        // is counted for the first MatMul op that claims it).
+        let mut k_strip_seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let matmul_phases: Vec<(i64, f64, i64)> = subgraph_ops
             .iter()
             .filter_map(|&op_idx| {
                 let op = &problem.ops[op_idx];
-                if op.is_matmul() {
-                    let kf = k_full_for_matmul(op, &problem.tensors);
-                    Some((kf, op.base_cost as f64))
-                } else {
-                    None
+                if !op.is_matmul() {
+                    return None;
                 }
+                let kf = k_full_for_matmul(op, &problem.tensors);
+                let lhs_idx = op.inputs[0];
+                let rhs_idx = op.inputs[1];
+                let mut op_k_strip: i64 = 0;
+                if !k_strip_seen.contains(&lhs_idx) {
+                    if let Some(&sz) = k_strip_map.get(&lhs_idx) {
+                        op_k_strip += sz;
+                    }
+                    k_strip_seen.insert(lhs_idx);
+                }
+                if !k_strip_seen.contains(&rhs_idx) {
+                    if let Some(&sz) = k_strip_map.get(&rhs_idx) {
+                        op_k_strip += sz;
+                    }
+                    k_strip_seen.insert(rhs_idx);
+                }
+                Some((kf, op.base_cost as f64, op_k_strip))
             })
             .collect();
 
@@ -379,98 +402,93 @@ pub fn subgraph_latency(
         } else {
             // Mixed-K path: compute phase-by-phase.
             //
-            // Sort unique K_full values descending. Phase boundaries are the step counts
-            // at which MatMuls with smaller K_full finish.
+            // Phases are defined by sorted unique step-end boundaries (when each MatMul finishes).
             //
             // Example: K_full = [4, 8], k = 2
             //   MatMul-A finishes at step ceil(4/2)=2, MatMul-B at step ceil(8/2)=4
             //   Phase 1: steps 0..2 — both active (2 steps)
             //   Phase 2: steps 2..4 — only MatMul-B active (2 steps)
             //
-            // For k_strip memory: each active MatMul contributes k_strip proportional
-            // to its K_full share. Since k_strip is already precomputed based on
-            // the full k value, we need per-MatMul k_strip contributions.
-            //
-            // Per-MatMul k_strip contribution (for RHS/LHS loaded each step):
-            //   For non-ephemeral-output MatMul LHS: h * k
-            //   For RHS standard: k * w
-            //   For RHS ephemeral: rhs.height * k
-            // These are already summed in k_strip_total. For mixed-K, we track
-            // per-step compute separately and use k_strip_total for active steps
-            // (assuming each MatMul's strip is proportional to k, not K_full).
-            //
-            // Collect unique step boundaries (when each MatMul finishes):
+            // Within a phase all steps have identical cost except:
+            //   - Global step 0: loads full_load_total + pw_load_total additionally
+            //   - Global last step: evicts output + adds PW compute
+            // Replace the per-step loop with O(1) per-phase arithmetic.
             let mut step_ends: Vec<i64> = matmul_phases
                 .iter()
-                .map(|(kf, _)| (*kf + k - 1) / k)
+                .map(|(kf, _, _)| (*kf + k - 1) / k)
                 .collect();
             step_ends.sort_unstable();
             step_ends.dedup();
-            // step_ends[-1] == num_k_steps (max)
+            // step_ends.last() == num_k_steps (max)
 
             let mut per_tile_lat = 0.0_f64;
             let mut prev_end: i64 = 0;
 
             for (phase_idx, &phase_end) in step_ends.iter().enumerate() {
-                // Active MatMuls: those with step_count >= phase_end
-                // (i.e., K_full >= phase_end * k, meaning they haven't finished yet)
+                // Active MatMuls: those with step_count >= phase_end.
                 let active_compute: f64 = matmul_phases
                     .iter()
-                    .filter(|(kf, _)| {
-                        let steps = (*kf + k - 1) / k;
-                        steps >= phase_end
-                    })
-                    .map(|(kf, cost)| cost * (k as f64 / *kf as f64))
+                    .filter(|(kf, _, _)| (*kf + k - 1) / k >= phase_end)
+                    .map(|(kf, cost, _)| cost * (k as f64 / *kf as f64))
                     .sum();
 
-                // k_strip for active MatMuls: approximate by scaling total k_strip
-                // by the fraction of MatMuls still active.
-                // More precisely: k_strip_total was computed over ALL MatMuls; inactive
-                // ones no longer contribute strips. Re-compute active k_strip contribution.
-                //
-                // For accuracy, reuse matmul_phases proportions: each MatMul's k_strip
-                // share is proportional to its op's input sizes. Since we don't track
-                // per-MatMul k_strip sizes here, use active_compute fraction as proxy.
-                // This is exact when all MatMul RHS/LHS sizes are equal; for the general
-                // case it's an approximation, but phase transitions only affect compute.
-                //
-                // A cleaner approach: compare active_compute vs full matmul_compute ratio.
-                let active_k_strip = if matmul_compute > 0.0 {
-                    k_strip_total as f64 * (active_compute / matmul_compute)
-                } else {
-                    k_strip_total as f64
-                };
+                // Active k_strip: sum per-op contributions for active MatMuls only.
+                // This is exact because each op's contribution was precomputed from
+                // its actual tensor dimensions, not from a compute-ratio proxy.
+                let active_k_strip_elems: i64 = matmul_phases
+                    .iter()
+                    .filter(|(kf, _, _)| (*kf + k - 1) / k >= phase_end)
+                    .map(|(_, _, ks)| ks)
+                    .sum();
+                let active_k_strip = active_k_strip_elems as f64 / bw;
 
                 let phase_steps = phase_end - prev_end;
                 let is_last_phase = phase_idx == step_ends.len() - 1;
 
-                // All steps within a phase are "interior" except:
-                // - The very first step (phase 0, step 0): loads full_load + pw_load too
-                // - The very last step (last phase, last step): evicts output + PW compute
-                for step_offset in 0..phase_steps {
-                    let global_step = prev_end + step_offset;
-                    let is_first_step = global_step == 0;
-                    let is_last_step = is_last_phase && step_offset == phase_steps - 1;
+                // O(1) per phase: classify steps as first, interior, or last.
+                // Special steps: global step 0 (loads full_load + pw_load) and
+                // global last step (evicts output, adds PW compute).
+                let has_first = prev_end == 0;
+                let has_last = is_last_phase; // last phase always contains the last step
 
-                    let mem = if is_first_step {
-                        (full_load_total + pw_load_total) as f64 / bw + active_k_strip / bw
+                // Interior steps: all steps in this phase that are neither first nor last.
+                let interior_count = (phase_steps
+                    - if has_first { 1 } else { 0 }
+                    - if has_last { 1 } else { 0 })
+                .max(0);
+
+                if has_first {
+                    let mem = (full_load_total + pw_load_total) as f64 / bw + active_k_strip;
+                    // First step is also last only when num_k_steps == 1, which is
+                    // impossible here (we are in the num_k_steps > 1 branch).
+                    per_tile_lat += f64::max(active_compute, mem);
+                }
+
+                if interior_count > 0 {
+                    let interior_lat = f64::max(active_compute, active_k_strip);
+                    per_tile_lat += interior_count as f64 * interior_lat;
+                }
+
+                if has_last {
+                    // If this phase has exactly one step and it is also the first step,
+                    // we already accounted for it above; replace that cost with the
+                    // combined first+last cost.
+                    let is_also_first = has_first && phase_steps == 1;
+                    if !is_also_first {
+                        let mem_last = active_k_strip + plan.out_evict_size as f64 / bw;
+                        let compute_last = active_compute + pw_compute;
+                        per_tile_lat += f64::max(compute_last, mem_last);
                     } else {
-                        active_k_strip / bw
-                    };
-
-                    let mem_with_evict = if is_last_step {
-                        mem + plan.out_evict_size as f64 / bw
-                    } else {
-                        mem
-                    };
-
-                    let compute_this_step = if is_last_step {
-                        active_compute + pw_compute
-                    } else {
-                        active_compute
-                    };
-
-                    per_tile_lat += f64::max(compute_this_step, mem_with_evict);
+                        // Single-step phase that is both first and last.
+                        // Undo the first-step cost already added, then add combined cost.
+                        let first_mem = (full_load_total + pw_load_total) as f64 / bw + active_k_strip;
+                        per_tile_lat -= f64::max(active_compute, first_mem);
+                        let mem_last = (full_load_total + pw_load_total) as f64 / bw
+                            + active_k_strip
+                            + plan.out_evict_size as f64 / bw;
+                        let compute_last = active_compute + pw_compute;
+                        per_tile_lat += f64::max(compute_last, mem_last);
+                    }
                 }
 
                 prev_end = phase_end;
