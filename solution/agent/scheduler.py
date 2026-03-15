@@ -268,17 +268,6 @@ def optimize(problem: Problem) -> Solution:
 
                 merged = sg_ops[i] + sg_ops[i + 1]
 
-                # K_full consistency: all MatMuls must share the same K_full
-                matmul_k_fulls = [
-                    _k_full_for_op(problem.ops[o], problem)
-                    for o in merged if problem.ops[o].op_type == "MatMul"
-                ]
-                if matmul_k_fulls and len(set(matmul_k_fulls)) > 1:
-                    rejected_merges.add(merge_key)
-                    new_sg_ops.append(sg_ops[i])
-                    i += 1
-                    continue
-
                 # Boundary output dimension consistency
                 boundary_outs = list(_boundary_outputs_for_subgraph(merged, problem))
                 if boundary_outs:

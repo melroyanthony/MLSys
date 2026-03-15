@@ -43,7 +43,7 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 
 | # | Feature | Acceptance Criteria | Est. (h) | Depends On |
 |---|---------|--------------------|----|-----------|
-| 1 | **F-14: Topological sort** | Given any valid DAG, returns operations in a valid linearized order (tested on examples 1–5) | 1 | none |
+| 1 | **F-14: Topological sort** | Given any valid DAG, returns operations in a valid linearized order (tested on examples 1-5) | 1 | none |
 | 2 | **F-01: Problem JSON parser** | Reads all 5 benchmark files + example_problem.json without error; reconstructs `Problem` struct with correct tensor/op counts and hardware params | 2 | none |
 | 3 | **F-02: Latency model** | Passes all 5 worked-example test cases from PROBLEM.md with latencies matching to 0.1 precision; handles compute-bound, memory-bound, and tiled (multi-step) cases correctly | 4 | F-01 |
 | 4 | **F-03: Working-set calculator** | Given a subgraph definition + resident tensor set + granularity, returns working-set size and raises OOM flag if > `fast_memory_capacity`; verified against all 5 examples | 3 | F-01, F-02 |
@@ -51,10 +51,10 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 | 6 | **F-11: Solution JSON serializer** | Writes well-formed JSON matching the output schema; round-trips through a JSON validator; `null` traversal_orders serialize correctly | 2 | none |
 | 7 | **F-04: Baseline scheduler** | Produces one valid subgraph per operation; uses native granularity `[128, 128, K_full]`; `tensors_to_retain = []` for all; latency values match model; no OOM on any benchmark | 2 | F-01, F-02, F-03, F-11, F-14 |
 | 8 | **F-12: Benchmark runner** | CLI that accepts `--problem FILE --solution FILE`, calls evaluate logic, prints total latency and pass/fail | 3 | F-01, F-11 |
-| 9 | **F-05: Op grouping / chain fusion** | Cost-based fusion: group adjacent ops only when fused latency is meaningfully less than `lat_a + lat_b` (relative tolerance to avoid float noise; boundary DRAM already included in individual latencies); verify latency improves vs. baseline on all 5 benchmarks | 6 | F-14, F-03, F-02 |
+| 9 | **F-05: Op grouping / chain fusion** | Cost-based fusion: group adjacent ops only when fused latency is meaningfully less than `lat_a + lat_b` (relative tolerance to avoid float noise; boundary DRAM already included in individual latencies); **mixed-K fusion allowed (Issue #22)**: ops with different K_full values may be fused into the same subgraph when the cost-based criterion is satisfied, using the mixed-K execution model where `num_k_steps = ceil(max(K_full) / k)` and each MatMul is active for its own `ceil(K_full_op / k)` steps; verify latency improves vs. baseline on all 5 benchmarks | 6 | F-14, F-03, F-02 |
 | 10 | **F-07: Tensor retention** | After each subgraph, determine which output tensors are consumed by the immediately following subgraph and have sufficient residual capacity; retain them; verify improvement on Example 3C pattern | 4 | F-05, F-03 |
 | 11 | **F-08: Split-K** | For MatMul subgraphs where full-k working set exceeds capacity, search for the largest `k` divisor that fits; model accumulator as resident across k-steps; verify Example 5B latency | 5 | F-05, F-03, F-02 |
-| 12 | **F-06: Granularity search** | For each subgraph, try candidate `[w, h]` values (powers of 2 up to tensor dimensions); **for MatMul subgraphs, also search `k` from `K_full` down to 1 in powers of 2 (Issue #15 fix) -- k must not be hardcoded to 1**; use **closed-form latency evaluation** (ADR-005, Issue #16) instead of tile-by-tile simulation; select the `[w, h, k]` combination that minimizes subgraph latency within the OOM constraint; larger k values reduce the total number of k-steps and total memory reloads; verify Example 1C pattern and that k > 1 is chosen for MatMul ops where the memory budget allows | 8 | F-05, F-03, F-02 |
+| 12 | **F-06: Granularity search** | For each subgraph, try candidate `[w, h]` values (powers of 2 up to tensor dimensions); **for MatMul subgraphs, also search `k` from `K_max` down to 1 in powers of 2 where `K_max = max(K_full_op)` across all MatMuls in the subgraph (Issue #15 fix, Issue #22 mixed-K) -- k must not be hardcoded to 1**; use **closed-form latency evaluation** (ADR-005, Issue #16) instead of tile-by-tile simulation; for mixed-K subgraphs, the closed-form evaluator groups steps into phases by active op set (ADR-006); select the `[w, h, k]` combination that minimizes subgraph latency within the OOM constraint; larger k values reduce the total number of k-steps and total memory reloads; verify Example 1C pattern and that k > 1 is chosen for MatMul ops where the memory budget allows | 8 | F-05, F-03, F-02 |
 
 **Total MVP Estimated Effort: 43 hours**
 
@@ -72,15 +72,21 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 - [ ] The `subgraph_latencies` values in every output JSON match the latency model to within
   floating-point tolerance (validated by `Evaluate()` or the Python re-implementation)
 - [ ] No solution contains a working set exceeding `fast_memory_capacity` for any benchmark
-- [ ] For MatMul subgraphs, `k` is searched from `K_full` down to 1 (powers of 2) and the
-  `(w, h, k)` triple that minimizes total subgraph latency within `fast_memory_capacity` is
-  selected (larger `k` is preferred as a tie-breaker when latencies are equal)
+- [ ] For MatMul subgraphs, `k` is searched from `K_max` down to 1 (powers of 2) where
+  `K_max = max(K_full_op)` across all MatMuls in the subgraph, and the `(w, h, k)` triple
+  that minimizes total subgraph latency within `fast_memory_capacity` is selected (larger `k`
+  is preferred as a tie-breaker when latencies are equal)
+- [ ] Mixed-K fusion is supported (Issue #22): subgraphs may contain MatMuls with different
+  K_full values; each MatMul is active for `ceil(K_full_op / k)` steps and contributes zero
+  compute/memory after completing its reduction; the subgraph runs for
+  `ceil(max(K_full) / k)` total k-steps
 
 ### Performance (Issue #16)
 - [ ] Each of the 5 benchmarks completes end-to-end (parse, optimize, serialize) in under 2
   seconds on a standard developer machine (M-series Mac or modern x86-64)
 - [ ] The granularity search stage must not be the performance bottleneck: candidate evaluation
-  uses closed-form latency (O(1) per candidate, not tile-by-tile simulation)
+  uses closed-form latency (O(1) per candidate for uniform-K, O(distinct_K) for mixed-K,
+  not tile-by-tile simulation)
 - [ ] Cost-based fusion must not regress performance: the merge-vs-split comparison adds
   negligible overhead relative to the O(N^2) fusion loop
 
@@ -90,6 +96,8 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
   individual latencies already include boundary DRAM)
 - [ ] No benchmark exhibits a latency regression from fusion (i.e., fusing never makes things
   worse than keeping subgraphs separate)
+- [ ] Mixed-K fusion (Issue #22) eliminates artificial DRAM boundaries between ops with
+  different K_full values, targeting approximately 30% improvement on benchmarks 1 and 9
 
 ---
 
@@ -99,11 +107,13 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 1. Scheduler reads problem JSON         -> Parses Problem struct with tensors, ops, hw params
 2. Topological sort                     -> Linearized op execution order
 3. Baseline schedule generated          -> Valid JSON, all ops covered, no OOM
-4. Cost-based chain fusion applied      -> Adjacent ops merged only when fused latency wins
+4. Cost-based chain fusion applied      -> Adjacent ops merged only when fused latency wins;
+                                           mixed-K fusion allowed (Issue #22)
 5. Tensor retention decided             -> Downstream-needed tensors flagged as resident
 6. Split-K applied to MatMul subgraphs  -> k reduced to fit tight memory budgets
 7. Granularity search per subgraph      -> Best [w, h, k] selected via closed-form evaluation;
-                                           k searched from K_full downward for MatMul ops
+                                           k searched from K_max downward for MatMul ops;
+                                           mixed-K subgraphs use phased evaluation (ADR-006)
 8. Latency calculated for each subgraph -> subgraph_latencies list populated
 9. Solution JSON written                -> Ready for Evaluate() call
 10. Benchmark runner reports total      -> Score vs. baseline shown; validated correct
@@ -147,4 +157,5 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 | Benchmark 17 (160 tensors, 95+ ops, 500K fast memory) has complex topology that greedy fusion mishandles | M | M | Analyze graph structure in architecture stage; design fusion rules for the attention-like repeating pattern observed in benchmarks 9, 13, 17 |
 | Working-set formula for subgraphs containing both MatMul and Pointwise ops is incorrectly specified | L | H | Cross-check against Example 5B which has exactly this combination; add a dedicated test case |
 | Granularity search too slow on large benchmarks (Issue #16) | H | H | Use closed-form latency evaluation (ADR-005) instead of tile-by-tile simulation; early termination on OOM; target < 2s per benchmark |
-| Granularity search defaults to k=1 for MatMul ops (Issue #15) | H | H | Search k from K_full downward; select the (w,h,k) minimizing total latency (larger k as tie-breaker); add regression test asserting k > 1 on any benchmark where K_full > 1 and memory allows |
+| Granularity search defaults to k=1 for MatMul ops (Issue #15) | H | H | Search k from K_max downward; select the (w,h,k) minimizing total latency (larger k as tie-breaker); add regression test asserting k > 1 on any benchmark where K_full > 1 and memory allows |
+| Mixed-K latency model incorrectly computes phased execution (Issue #22) | M | H | Validate against hand-computed examples with known mixed-K subgraphs; ensure uniform-K is a degenerate case that produces identical results to the previous model; add regression tests for mixed-K scenarios |

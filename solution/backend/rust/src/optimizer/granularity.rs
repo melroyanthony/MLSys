@@ -11,8 +11,9 @@ use crate::memory::{check_oom, find_split_k};
 use crate::models::{Granularity, Problem, SubgraphDef};
 use crate::parser::k_full_for_matmul;
 
-/// Find K_full for a subgraph: the minimum K_full across ALL MatMuls in the subgraph.
-/// Internal MatMuls (ephemeral output) still drive k-step counts, so we must consider them.
+/// Find K_full for a subgraph: the maximum K_full across ALL MatMuls in the subgraph.
+/// Uses max so k candidates extend up to the longest reduction dimension, allowing
+/// all k steps to be explored for mixed-K subgraphs.
 fn find_k_full(ops: &[usize], problem: &Problem, _dag: &DagInfo) -> Option<i64> {
     ops.iter()
         .filter_map(|&op_idx| {
@@ -23,7 +24,7 @@ fn find_k_full(ops: &[usize], problem: &Problem, _dag: &DagInfo) -> Option<i64> 
                 None
             }
         })
-        .min()
+        .max()
 }
 
 /// Generate candidate w/h values for a given tensor dimension.

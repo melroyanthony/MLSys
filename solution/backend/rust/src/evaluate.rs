@@ -71,8 +71,10 @@ pub fn evaluate(problem: &Problem, solution: &Solution) -> Result<EvaluateResult
             }
         }
 
-        // Validate MatMul K_full consistency and k <= K_full
-        let matmul_k_fulls: Vec<i64> = sg.ops.iter()
+        // Validate k does not exceed the maximum K_full across all MatMuls.
+        // Mixed-K subgraphs (MatMuls with different K_full values) are allowed;
+        // k only needs to be <= max(K_full) so the step count is well-defined.
+        let max_k_full: Option<i64> = sg.ops.iter()
             .filter_map(|&op_idx| {
                 let op = &problem.ops[op_idx];
                 if op.is_matmul() {
@@ -81,20 +83,12 @@ pub fn evaluate(problem: &Problem, solution: &Solution) -> Result<EvaluateResult
                     None
                 }
             })
-            .collect();
-        if !matmul_k_fulls.is_empty() {
-            // All MatMuls in a subgraph must share the same K_full
-            if !matmul_k_fulls.iter().all(|&kf| kf == matmul_k_fulls[0]) {
+            .max();
+        if let Some(kf_max) = max_k_full {
+            if sg.granularity.k > kf_max {
                 return Err(format!(
-                    "Subgraph {sg_idx}: MatMul ops have inconsistent K_full values: {:?}",
-                    matmul_k_fulls
-                ));
-            }
-            // k must not exceed K_full
-            if sg.granularity.k > matmul_k_fulls[0] {
-                return Err(format!(
-                    "Subgraph {sg_idx}: granularity k={} exceeds K_full={}",
-                    sg.granularity.k, matmul_k_fulls[0]
+                    "Subgraph {sg_idx}: granularity k={} exceeds max K_full={}",
+                    sg.granularity.k, kf_max
                 ));
             }
         }

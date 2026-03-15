@@ -389,11 +389,11 @@ def compute_working_set(
     boundary_outputs = _boundary_outputs_for_subgraph(subgraph_ops, problem)
 
     # Determine whether this is a split-K scenario.
-    # Use min(K_full) across all MatMuls, consistent with compute_subgraph_latency().
+    # Use max(K_full) across all MatMuls, consistent with compute_subgraph_latency().
     matmul_ops = [op_idx for op_idx in subgraph_ops
                   if problem.ops[op_idx].op_type == "MatMul"]
     if matmul_ops:
-        k_full = min(_k_full_for_op(problem.ops[op_idx], problem) for op_idx in matmul_ops)
+        k_full = max(_k_full_for_op(problem.ops[op_idx], problem) for op_idx in matmul_ops)
         num_k_steps = math.ceil(k_full / k)
     else:
         k_full = 1
@@ -507,29 +507,33 @@ def compute_subgraph_latency(
     num_tiles_h = math.ceil(H_out / h)
     num_spatial_tiles = num_tiles_w * num_tiles_h
 
-    # K-steps: derive from the minimum K_full across ALL MatMuls in the subgraph.
+    # K-steps: derive from the maximum K_full across ALL MatMuls in the subgraph.
+    # The subgraph runs until the longest reduction finishes (mixed-K support).
     # Internal MatMuls (whose output is ephemeral) still need k-steps.
     # If there is no MatMul at all, k is irrelevant: 1 k-step.
     matmul_ops = [op_idx for op_idx in subgraph_ops
                   if problem.ops[op_idx].op_type == "MatMul"]
     if matmul_ops:
-        min_k_full = min(
+        max_k_full = max(
             _k_full_for_op(problem.ops[op_idx], problem) for op_idx in matmul_ops
         )
-        num_k_steps = math.ceil(min_k_full / k)
+        num_k_steps = math.ceil(max_k_full / k)
     else:
         num_k_steps = 1
 
     is_split_k = num_k_steps > 1
 
-    # Split compute: MatMul cost paid every k-step; Pointwise cost only on last k-step.
+    # Split compute: MatMul cost paid every k-step it is active; Pointwise only on last k-step.
+    # For mixed-K: each MatMul is active for ceil(its_K_full / k) steps.
+    # matmul_compute_per_step is the total compute when ALL MatMuls are active (step 0 onward).
     matmul_compute_per_step = 0.0
     pointwise_compute = 0.0
     for op_idx in subgraph_ops:
         op = problem.ops[op_idx]
         if op.op_type == "MatMul":
             k_full_op = _k_full_for_op(op, problem)
-            matmul_compute_per_step += op.base_cost * (k / k_full_op)
+            cost_per_step = op.base_cost * (min(k, k_full_op) / k_full_op)
+            matmul_compute_per_step += cost_per_step
         else:
             pointwise_compute += op.base_cost
 
@@ -573,6 +577,51 @@ def compute_subgraph_latency(
     # Total k_strip load per step (k_strip LHS + both RHS types)
     k_strip_total_per_step = k_strip_lhs_per_step + rhs_std_per_step + rhs_eph_per_step
 
+    # Per-MatMul k_strip contribution and per-tensor active-step-count for mixed-K.
+    # Each MatMul op contributes k_strip from its boundary inputs that are not retained:
+    #   - non-ephemeral LHS (in k_strip_lhs): h * k_eff / bw
+    #   - non-ephemeral RHS (in rhs_standard): k_eff * w / bw
+    #   - ephemeral RHS (in rhs_ephemeral): rhs.height * k_eff / bw
+    #   where k_eff = min(k, K_full_op) for each MatMul
+    # Deduplication mirrors _categorize_inputs (a tensor counted once for its first op).
+    #
+    # matmul_phase_info: list of (k_full, base_cost, k_strip_contribution_per_step)
+    # k_strip_tensor_active_steps: tensor_id -> step count of its owning MatMul.
+    #   Used in the simulation path to load k_strip inputs only while their op is active.
+    matmul_phase_info: list[tuple[int, float, float]] = []
+    k_strip_tensor_active_steps: dict[int, int] = {}
+    k_strip_tensor_k_eff: dict[int, int] = {}  # tensor_id -> min(k, K_full_op)
+    _seen_k_strip: set[int] = set()
+    for op_idx in subgraph_ops:
+        op = problem.ops[op_idx]
+        if op.op_type != "MatMul":
+            continue
+        k_full_op = _k_full_for_op(op, problem)
+        op_steps = math.ceil(k_full_op / k)
+        k_eff = min(k, k_full_op)  # clamp k to this op's K_full
+        lhs_idx = op.inputs[0]
+        rhs_idx = op.inputs[1]
+        op_k_strip = 0.0
+        if lhs_idx in k_strip_lhs and lhs_idx not in _seen_k_strip:
+            _seen_k_strip.add(lhs_idx)
+            if lhs_idx not in retained_tensors:
+                op_k_strip += (h * k_eff) / bw
+                k_strip_tensor_active_steps[lhs_idx] = op_steps
+                k_strip_tensor_k_eff[lhs_idx] = k_eff
+        if rhs_idx in rhs_standard and rhs_idx not in _seen_k_strip:
+            _seen_k_strip.add(rhs_idx)
+            if rhs_idx not in retained_tensors:
+                op_k_strip += (k_eff * w) / bw
+                k_strip_tensor_active_steps[rhs_idx] = op_steps
+                k_strip_tensor_k_eff[rhs_idx] = k_eff
+        if rhs_idx in rhs_ephemeral and rhs_idx not in _seen_k_strip:
+            _seen_k_strip.add(rhs_idx)
+            if rhs_idx not in retained_tensors:
+                op_k_strip += (problem.tensors[rhs_idx].height * k_eff) / bw
+                k_strip_tensor_active_steps[rhs_idx] = op_steps
+                k_strip_tensor_k_eff[rhs_idx] = k_eff
+        matmul_phase_info.append((k_full_op, op.base_cost, op_k_strip))
+
     # Pointwise inputs: w * h per spatial tile (first k-step).
     pw_load_per_tile = sum(
         (w * h) / bw
@@ -593,22 +642,100 @@ def compute_subgraph_latency(
     if traversal_order is None:
         if is_split_k:
             # Split-K mode: all spatial tiles are identical (no row-reuse).
-            # full_load LHS loaded once per tile. k_strip LHS + RHS loaded every k-step.
-            # First k-step: full_load + pw_load + k_strip_total
-            first_k_mem = full_load_lhs_time + pw_load_per_tile + k_strip_total_per_step
-            first_k_lat = max(matmul_compute_per_step, first_k_mem)
+            #
+            # Check if all MatMuls have the same K_full (fast path) or mixed-K (phase path).
+            unique_k_fulls = set(kf for kf, _, _ in matmul_phase_info)
+            all_same_k_full = len(unique_k_fulls) <= 1
 
-            # Interior k-steps: k_strip_total only
-            if num_k_steps > 2:
-                interior_k_lat = max(matmul_compute_per_step, k_strip_total_per_step)
+            if all_same_k_full:
+                # Fast path: uniform K_full — original formula.
+                # full_load LHS loaded once per tile. k_strip LHS + RHS loaded every k-step.
+                # First k-step: full_load + pw_load + k_strip_total
+                first_k_mem = full_load_lhs_time + pw_load_per_tile + k_strip_total_per_step
+                first_k_lat = max(matmul_compute_per_step, first_k_mem)
+
+                # Interior k-steps: k_strip_total only
+                if num_k_steps > 2:
+                    interior_k_lat = max(matmul_compute_per_step, k_strip_total_per_step)
+                else:
+                    interior_k_lat = 0.0
+
+                # Last k-step: k_strip_total + eviction, compute includes PW
+                last_k_mem = k_strip_total_per_step + out_evict_per_tile
+                last_k_lat = max(matmul_compute_per_step + pointwise_compute, last_k_mem)
+
+                per_tile_lat = first_k_lat + max(0, num_k_steps - 2) * interior_k_lat + last_k_lat
             else:
-                interior_k_lat = 0.0
+                # Mixed-K path: compute phase-by-phase.
+                # Each MatMul is active for ceil(its_K_full / k) steps.
+                # Phases are defined by sorted unique step-end boundaries.
+                step_ends = sorted(set(math.ceil(kf / k) for kf, _, _ in matmul_phase_info))
+                # step_ends[-1] == num_k_steps
 
-            # Last k-step: k_strip_total + eviction, compute includes PW
-            last_k_mem = k_strip_total_per_step + out_evict_per_tile
-            last_k_lat = max(matmul_compute_per_step + pointwise_compute, last_k_mem)
+                per_tile_lat = 0.0
+                prev_end = 0
 
-            per_tile_lat = first_k_lat + max(0, num_k_steps - 2) * interior_k_lat + last_k_lat
+                for phase_idx, phase_end in enumerate(step_ends):
+                    # Active MatMuls: those whose step count >= phase_end.
+                    active_compute = sum(
+                        bc * (min(k, kf) / kf)
+                        for kf, bc, _ in matmul_phase_info
+                        if math.ceil(kf / k) >= phase_end
+                    )
+
+                    # Active k_strip: sum per-op contributions for active MatMuls only.
+                    # This is exact (no proxy ratio) because each op's contribution is
+                    # precomputed from its actual tensor dimensions.
+                    active_k_strip = sum(
+                        ks
+                        for kf, _, ks in matmul_phase_info
+                        if math.ceil(kf / k) >= phase_end
+                    )
+
+                    phase_steps = phase_end - prev_end
+                    is_last_phase = (phase_idx == len(step_ends) - 1)
+
+                    # O(1) per phase: classify steps as first, interior, or last.
+                    # Special steps: global step 0 (loads full_load + pw_load) and
+                    # global last step (evicts output, adds PW compute).
+                    has_first = (prev_end == 0)
+                    has_last = is_last_phase  # last phase always contains the last step
+
+                    # Interior steps: all steps in this phase that are neither first nor last.
+                    interior_count = phase_steps - (1 if has_first else 0) - (1 if has_last else 0)
+                    # interior_count can be negative when a single step is both first and last.
+                    interior_count = max(0, interior_count)
+
+                    if has_first:
+                        mem = full_load_lhs_time + pw_load_per_tile + active_k_strip
+                        # The first step is also the last only when num_k_steps == 1,
+                        # but that case is handled by the all_same_k_full branch above.
+                        per_tile_lat += max(active_compute, mem)
+
+                    if interior_count > 0:
+                        interior_lat = max(active_compute, active_k_strip)
+                        per_tile_lat += interior_count * interior_lat
+
+                    if has_last:
+                        # If phase has only one step and it's also the first step,
+                        # we already added the first step above; skip duplicate.
+                        is_also_first = has_first and (phase_steps == 1)
+                        if not is_also_first:
+                            mem_last = active_k_strip + out_evict_per_tile
+                            compute_last = active_compute + pointwise_compute
+                            per_tile_lat += max(compute_last, mem_last)
+                        else:
+                            # Single-step phase that is both first and last: adjust the
+                            # first-step cost to include eviction and PW compute.
+                            mem_last = full_load_lhs_time + pw_load_per_tile + active_k_strip + out_evict_per_tile
+                            compute_last = active_compute + pointwise_compute
+                            # Undo the first-step contribution already added and replace it.
+                            first_mem = full_load_lhs_time + pw_load_per_tile + active_k_strip
+                            per_tile_lat -= max(active_compute, first_mem)
+                            per_tile_lat += max(compute_last, mem_last)
+
+                    prev_end = phase_end
+
             return num_spatial_tiles * per_tile_lat
 
         else:
@@ -667,15 +794,18 @@ def compute_subgraph_latency(
                         resident_full_lhs[t_idx] = tile_row
 
             # ------- k_strip LHS (non-ephemeral-output MatMul) -------
-            # In split-K: loaded every k-step (no reuse).
+            # In split-K: loaded every k-step (no reuse), but only while the
+            # owning MatMul is still active (k_step < ceil(K_full_op / k)).
             # In spatial-only: row-reusable (same as full_load).
             for t_idx in k_strip_lhs:
                 if t_idx in retained_tensors:
                     continue
+                ke = k_strip_tensor_k_eff.get(t_idx, k)
                 if is_split_k:
-                    mem_in += (h * k) / bw
+                    if k_step < k_strip_tensor_active_steps.get(t_idx, num_k_steps):
+                        mem_in += (h * ke) / bw
                 elif is_first_k and resident_k_strip_lhs[t_idx] != tile_row:
-                    mem_in += (h * k) / bw
+                    mem_in += (h * ke) / bw
                     resident_k_strip_lhs[t_idx] = tile_row
 
             # ------- RHS tensors -------
@@ -683,20 +813,25 @@ def compute_subgraph_latency(
                 for t_idx in all_rhs:
                     if t_idx in retained_tensors:
                         continue
+                    # Only load if the owning MatMul is still active this step.
+                    if k_step >= k_strip_tensor_active_steps.get(t_idx, num_k_steps):
+                        continue
+                    ke = k_strip_tensor_k_eff.get(t_idx, k)
                     if t_idx in rhs_ephemeral:
-                        mem_in += (problem.tensors[t_idx].height * k) / bw
+                        mem_in += (problem.tensors[t_idx].height * ke) / bw
                     else:
-                        mem_in += (k * w) / bw
+                        mem_in += (ke * w) / bw
             else:
                 if is_first_k:
                     for t_idx in all_rhs:
                         if t_idx in retained_tensors:
                             continue
                         if resident_rhs[t_idx] != tile_col:
+                            ke = k_strip_tensor_k_eff.get(t_idx, k)
                             if t_idx in rhs_ephemeral:
-                                mem_in += (problem.tensors[t_idx].height * k) / bw
+                                mem_in += (problem.tensors[t_idx].height * ke) / bw
                             else:
-                                mem_in += (k * w) / bw
+                                mem_in += (ke * w) / bw
                             resident_rhs[t_idx] = tile_col
 
             # ------- Pointwise inputs -------
@@ -712,7 +847,13 @@ def compute_subgraph_latency(
                     if t_idx not in tensors_to_retain_after:
                         mem_out += (w * h) / bw
 
-            compute_this_step = matmul_compute_per_step + (pointwise_compute if is_last_k else 0.0)
+            # For mixed-K: only MatMuls that haven't finished yet contribute compute.
+            active_matmul_compute = sum(
+                bc * (min(k, kf) / kf)
+                for kf, bc, _ in matmul_phase_info
+                if k_step < math.ceil(kf / k)
+            )
+            compute_this_step = active_matmul_compute + (pointwise_compute if is_last_k else 0.0)
             memory_time = mem_in + mem_out
             step_latency = max(compute_this_step, memory_time)
             total_latency += step_latency
@@ -747,20 +888,18 @@ def evaluate(problem: Problem, solution: Solution) -> float:
         ops_in_sg = sg.ops
         gran = sg.granularity
 
-        # Validate MatMul K_full consistency and k <= K_full
+        # Validate k does not exceed the maximum K_full across all MatMuls.
+        # Mixed-K subgraphs (MatMuls with different K_full values) are allowed.
         matmul_k_fulls = [
             _k_full_for_op(problem.ops[op_idx], problem)
             for op_idx in ops_in_sg
             if problem.ops[op_idx].op_type == "MatMul"
         ]
         if matmul_k_fulls:
-            if len(set(matmul_k_fulls)) > 1:
+            max_k_full = max(matmul_k_fulls)
+            if gran.k > max_k_full:
                 raise ValidationError(
-                    f"Subgraph {sg_idx}: MatMul ops have inconsistent K_full values: {matmul_k_fulls}"
-                )
-            if gran.k > matmul_k_fulls[0]:
-                raise ValidationError(
-                    f"Subgraph {sg_idx}: granularity k={gran.k} exceeds K_full={matmul_k_fulls[0]}"
+                    f"Subgraph {sg_idx}: granularity k={gran.k} exceeds max K_full={max_k_full}"
                 )
 
         if not check_oom(ops_in_sg, gran, problem, retained_tensors):
