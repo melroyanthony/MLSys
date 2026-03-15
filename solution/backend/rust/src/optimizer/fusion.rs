@@ -12,7 +12,7 @@ use crate::latency::subgraph_latency;
 use crate::memory::find_split_k;
 use crate::models::{Granularity, Problem, SubgraphDef};
 use crate::optimizer::granularity::search_best_granularity;
-use crate::parser::{k_full_for_matmul, native_granularity_for_subgraph};
+use crate::parser::native_granularity_for_subgraph;
 
 /// Attempt to fuse the subgraphs in topological order.
 /// Returns a new list of subgraphs where adjacent groups have been merged
@@ -69,15 +69,7 @@ pub fn greedy_fusion(
                     })
                 };
 
-                // K_full consistency: all MatMuls must share the same K_full.
-                let matmul_k_fulls: Vec<i64> = merged.iter()
-                    .filter(|&&op_idx| problem.ops[op_idx].is_matmul())
-                    .map(|&op_idx| k_full_for_matmul(&problem.ops[op_idx], &problem.tensors))
-                    .collect();
-                let k_full_consistent = matmul_k_fulls.is_empty()
-                    || matmul_k_fulls.iter().all(|&kf| kf == matmul_k_fulls[0]);
-
-                if dims_consistent && k_full_consistent {
+                if dims_consistent {
                     if find_feasible_granularity(&merged, &retained_before, problem, dag).is_some()
                     {
                         let base_merged = native_granularity_for_subgraph(&merged, problem);
