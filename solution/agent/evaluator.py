@@ -571,17 +571,21 @@ def evaluate(problem: Problem, solution: Solution) -> float:
         ops_in_sg = sg.ops
         gran = sg.granularity
 
-        # Validate k <= min(K_full) for MatMul subgraphs
+        # Validate MatMul K_full consistency and k <= K_full
         matmul_k_fulls = [
             _k_full_for_op(problem.ops[op_idx], problem)
             for op_idx in ops_in_sg
             if problem.ops[op_idx].op_type == "MatMul"
         ]
-        if matmul_k_fulls and gran.k > min(matmul_k_fulls):
-            raise ValidationError(
-                f"Subgraph {sg_idx}: granularity k={gran.k} exceeds "
-                f"min K_full={min(matmul_k_fulls)} across MatMul ops"
-            )
+        if matmul_k_fulls:
+            if len(set(matmul_k_fulls)) > 1:
+                raise ValidationError(
+                    f"Subgraph {sg_idx}: MatMul ops have inconsistent K_full values: {matmul_k_fulls}"
+                )
+            if gran.k > matmul_k_fulls[0]:
+                raise ValidationError(
+                    f"Subgraph {sg_idx}: granularity k={gran.k} exceeds K_full={matmul_k_fulls[0]}"
+                )
 
         if not check_oom(ops_in_sg, gran, problem, retained_tensors):
             ws = compute_working_set(ops_in_sg, gran, problem, retained_tensors)

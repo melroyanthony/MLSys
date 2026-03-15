@@ -175,7 +175,7 @@ h candidates: powers of 2 from 1 up to output_height
 k candidates: K_cap, K_cap/2, K_cap/4, ..., 1  (powers of 2, descending)
 ```
 
-Where `K_cap = min(K_full for each MatMul op in the subgraph)`. Using the minimum ensures k never exceeds any MatMul's reduction dimension; `ceil(K_full/k)` handles any remainder. For Pointwise-only subgraphs, k is fixed at 1 and only (w, h) is searched.
+Where `K_cap = K_full` (the shared reduction dimension across all MatMuls in the subgraph). **Invariant: all MatMul ops within a single subgraph must share the same K_full.** This invariant is enforced during fusion (ops with different K_full are not merged) and validated during evaluation. It ensures the subgraph has a single, well-defined k-step loop. For Pointwise-only subgraphs, k is fixed at 1 and only (w, h) is searched.
 
 **For each (w, h, k) candidate:**
 1. Compute the working set (input slices + output slices + retained tensors)

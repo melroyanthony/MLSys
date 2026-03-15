@@ -71,8 +71,8 @@ pub fn evaluate(problem: &Problem, solution: &Solution) -> Result<EvaluateResult
             }
         }
 
-        // Validate k <= min(K_full) for MatMul subgraphs
-        let min_k_full: Option<i64> = sg.ops.iter()
+        // Validate MatMul K_full consistency and k <= K_full
+        let matmul_k_fulls: Vec<i64> = sg.ops.iter()
             .filter_map(|&op_idx| {
                 let op = &problem.ops[op_idx];
                 if op.is_matmul() {
@@ -81,12 +81,20 @@ pub fn evaluate(problem: &Problem, solution: &Solution) -> Result<EvaluateResult
                     None
                 }
             })
-            .min();
-        if let Some(kf) = min_k_full {
-            if sg.granularity.k > kf {
+            .collect();
+        if !matmul_k_fulls.is_empty() {
+            // All MatMuls in a subgraph must share the same K_full
+            if !matmul_k_fulls.iter().all(|&kf| kf == matmul_k_fulls[0]) {
                 return Err(format!(
-                    "Subgraph {sg_idx}: granularity k={} exceeds min K_full={kf} across MatMul ops",
-                    sg.granularity.k
+                    "Subgraph {sg_idx}: MatMul ops have inconsistent K_full values: {:?}",
+                    matmul_k_fulls
+                ));
+            }
+            // k must not exceed K_full
+            if sg.granularity.k > matmul_k_fulls[0] {
+                return Err(format!(
+                    "Subgraph {sg_idx}: granularity k={} exceeds K_full={}",
+                    sg.granularity.k, matmul_k_fulls[0]
                 ));
             }
         }
