@@ -212,6 +212,26 @@ def _classify_tensors(
     return produced_inside, consumed_inside, ephemeral
 
 
+def _boundary_outputs_for_subgraph(
+    subgraph_ops: list[int], problem: Problem
+) -> set[int]:
+    """
+    Boundary outputs: tensors produced inside the subgraph that are either
+    graph outputs OR consumed by ops outside the subgraph. Includes fan-out
+    (tensors consumed both inside and outside).
+    """
+    op_set = set(subgraph_ops)
+    tensor_consumers, graph_outs = _get_problem_info(problem)
+    result: set[int] = set()
+    for op_idx in subgraph_ops:
+        for t in problem.ops[op_idx].outputs:
+            if t in graph_outs:
+                result.add(t)
+            elif any(c not in op_set for c in tensor_consumers.get(t, [])):
+                result.add(t)
+    return result
+
+
 def _k_full_for_op(op: Op, problem: Problem) -> int:
     """The full reduction dimension (K) for a MatMul op."""
     lhs_idx = op.inputs[0]
@@ -228,7 +248,7 @@ def _output_tensor_for_subgraph(
     This is the final boundary output tensor.
     """
     produced_inside, consumed_inside, _ = _classify_tensors(subgraph_ops, problem)
-    boundary_outputs = produced_inside - consumed_inside
+    boundary_outputs = _boundary_outputs_for_subgraph(subgraph_ops, problem)
 
     if not boundary_outputs:
         last_op = problem.ops[subgraph_ops[-1]]
@@ -363,7 +383,7 @@ def compute_working_set(
 
     produced_inside, consumed_inside, ephemeral = _classify_tensors(subgraph_ops, problem)
     boundary_inputs = consumed_inside - produced_inside
-    boundary_outputs = produced_inside - consumed_inside
+    boundary_outputs = _boundary_outputs_for_subgraph(subgraph_ops, problem)
 
     # Determine whether this is a split-K scenario.
     # Use min(K_full) across all MatMuls, consistent with compute_subgraph_latency().
@@ -470,7 +490,7 @@ def compute_subgraph_latency(
         tensors_to_retain_after = set()
     produced_inside, consumed_inside, ephemeral = _classify_tensors(subgraph_ops, problem)
     boundary_inputs = consumed_inside - produced_inside
-    boundary_outputs = produced_inside - consumed_inside
+    boundary_outputs = _boundary_outputs_for_subgraph(subgraph_ops, problem)
 
     # Spatial tiling
     out_tensor = _output_tensor_for_subgraph(subgraph_ops, problem)

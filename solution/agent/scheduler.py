@@ -254,6 +254,39 @@ def optimize(problem: Problem) -> Solution:
             if i + 1 < len(sg_ops):
                 merged = sg_ops[i] + sg_ops[i + 1]
 
+                # K_full consistency: all MatMuls must share the same K_full
+                matmul_k_fulls = [
+                    _k_full_for_op(problem.ops[o], problem)
+                    for o in merged if problem.ops[o].op_type == "MatMul"
+                ]
+                if matmul_k_fulls and len(set(matmul_k_fulls)) > 1:
+                    new_sg_ops.append(sg_ops[i])
+                    i += 1
+                    continue
+
+                # Boundary output dimension consistency
+                out_tensor = _output_tensor_for_subgraph(merged, problem)
+                # _output_tensor_for_subgraph picks from boundary outputs;
+                # if multiple exist with different dims, skip merge
+                produced = set()
+                consumed = set()
+                op_set = set(merged)
+                for o in merged:
+                    produced.update(problem.ops[o].outputs)
+                    consumed.update(problem.ops[o].inputs)
+                boundary_outs = [t for t in produced
+                                 if t in get_graph_outputs(problem)
+                                 or any(c not in op_set
+                                        for c, op in enumerate(problem.ops)
+                                        if t in op.inputs)]
+                if boundary_outs:
+                    dims = [(problem.tensors[t].width, problem.tensors[t].height)
+                            for t in boundary_outs]
+                    if len(set(dims)) > 1:
+                        new_sg_ops.append(sg_ops[i])
+                        i += 1
+                        continue
+
                 g_merged = _find_safe_granularity(merged, problem, set())
                 if g_merged is None:
                     matmul_in_merged = [o for o in merged

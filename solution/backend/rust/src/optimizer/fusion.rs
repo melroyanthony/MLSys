@@ -120,13 +120,17 @@ pub fn greedy_fusion(
         cache = new_cache;
     }
 
-    // Convert groups back to SubgraphDef with the best feasible granularity
+    // Convert groups back to SubgraphDef, reusing cached best granularity.
     let mut result: Vec<SubgraphDef> = Vec::new();
-    let prev_retained: HashSet<usize> = HashSet::new();
 
-    for ops in &groups {
-        let gran = find_feasible_granularity(ops, &prev_retained, problem, dag)
-            .unwrap_or_else(|| native_granularity_for_subgraph(ops, problem));
+    for (i, ops) in groups.iter().enumerate() {
+        let gran = cache[i]
+            .as_ref()
+            .map(|(g, _)| g.clone())
+            .unwrap_or_else(|| {
+                find_feasible_granularity(ops, &retained_before, problem, dag)
+                    .unwrap_or_else(|| native_granularity_for_subgraph(ops, problem))
+            });
 
         result.push(SubgraphDef {
             ops: ops.clone(),
