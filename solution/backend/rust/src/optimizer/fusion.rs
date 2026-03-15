@@ -31,7 +31,6 @@ pub fn greedy_fusion(
 
     // Cache best latency per group to avoid redundant granularity searches.
     // Entry is (best_granularity, best_latency). Invalidated on merge.
-    // Also cache rejected merges to avoid re-evaluating unchanged pairs.
     let retained_before: HashSet<usize> = HashSet::new();
     let mut cache: Vec<Option<(Granularity, f64)>> = groups
         .iter()

@@ -213,25 +213,22 @@ Instead of iterating over every tile and k-step to sum per-step roofline costs (
 num_rows = ceil(H_out / h)
 num_cols = ceil(W_out / w)
 num_k_steps = ceil(K_full / k)
+```
 
-# Per-tile latency by position type
-**Spatial-only** (num_k_steps == 1): Row-reuse applies.
+**Spatial-only** (num_k_steps == 1) — row-reuse applies:
 
 ```
-# First tile of each row loads all inputs; subsequent tiles reuse LHS.
 first_col_latency = max(compute, (full_load + k_strip_lhs + rhs + pw + evict) / bw)
 other_col_latency = max(compute, (rhs + pw + evict) / bw)
-
 total_latency = num_rows * (first_col_latency + (num_cols - 1) * other_col_latency)
 ```
 
-**Split-K mode** (num_k_steps > 1): All spatial tiles are identical (no row-reuse). Three distinct k-step types per tile:
+**Split-K** (num_k_steps > 1) — all tiles identical, no row-reuse:
 
 ```
 first_k  = max(matmul_compute, (full_load + pw_load + k_strip) / bw)
 interior = max(matmul_compute, k_strip / bw)
 last_k   = max(matmul_compute + pw_compute, (k_strip + evict) / bw)
-
 per_tile = first_k + max(0, num_k_steps - 2) * interior + last_k
 total_latency = num_spatial_tiles * per_tile
 ```

@@ -237,9 +237,14 @@ def optimize(problem: Problem) -> Solution:
         if key not in cache:
             g = _find_safe_granularity(ops, problem, set())
             if g is None:
+                # No feasible granularity found — use infinity latency so this
+                # group is never favoured in fusion cost comparisons.
                 matmuls = [o for o in ops if problem.ops[o].op_type == "MatMul"]
                 kf = _k_full_for_op(problem.ops[matmuls[0]], problem) if matmuls else 1
                 g = Granularity(native_w, native_h, kf)
+                if not check_oom(ops, g, problem, set()):
+                    cache[key] = (g, float("inf"))
+                    return cache[key]
             lat = compute_subgraph_latency(ops, g, problem, set(), tensors_to_retain_after=set())
             cache[key] = (g, lat)
         return cache[key]
