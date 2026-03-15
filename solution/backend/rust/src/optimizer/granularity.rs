@@ -160,7 +160,7 @@ pub fn search_best_granularity(
 
                 // Prefer lower latency; tie-break with larger k (fewer k-steps).
                 // Use relative tolerance for float equality to handle accumulation error.
-                let effectively_equal = (lat - best_latency).abs() <= best_latency.abs() * 1e-9;
+                let effectively_equal = (lat - best_latency).abs() <= 1.0_f64.max(best_latency.abs()) * 1e-9;
                 if lat < best_latency || (effectively_equal && trial.k > best_gran.k) {
                     best_latency = lat;
                     best_gran = trial;
