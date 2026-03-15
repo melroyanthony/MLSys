@@ -42,7 +42,7 @@ A merge is only valid if the resulting subgraph is a **connected directed subDAG
 
 ### Positive
 - **Simple to implement**: implemented in Rust (Track A) and Python (Track B), well within the time budget
-- **Fast to execute**: O(N^2) worst case, sub-second for N=96
+- **Fast to execute**: O(N^2) worst case, sub-second for N=103
 - **Deterministic**: Same input always produces the same output
 - **Incremental**: Each merge is independently validated -- no risk of cascading failures
 - **Good enough**: For the linear and repeating block structures in the benchmarks, greedy fusion captures most of the benefit (chains fuse naturally)
@@ -69,8 +69,10 @@ The pure feasibility check (merge if working set fits) was replaced with a
 **cost-based merge criterion**: merge subgraphs A and B only when
 `latency(A+B, best_gran_fused) < latency(A, best_gran_A) + latency(B, best_gran_B)`.
 
-An epsilon tolerance is applied so that merges with negligible latency difference
-(within floating-point rounding) are accepted, avoiding churn on borderline cases.
+An epsilon tolerance is applied: a merge is accepted only when the fused latency
+is strictly lower than the split latency by more than the tolerance (i.e.,
+`lat_fused < lat_split - eps`). Borderline cases within epsilon are rejected,
+ensuring merges provide a meaningful improvement.
 
 This prevents fusions where forcing a shared granularity on the merged subgraph
 degrades latency more than the DRAM savings from making intermediate tensors

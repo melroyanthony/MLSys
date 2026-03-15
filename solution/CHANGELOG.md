@@ -82,8 +82,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     - Edge cases: single tiny op, OOM detection, serialization round-trip,
       ephemeral tensor boundary correctness, cyclic DAG rejection
     - All 5 released benchmarks: full pipeline validity check
-    - New tests (3): `fused_matmul_pointwise_splitk`, `boundary_pw_input`,
-      `mixed_k_two_matmuls`
+    - New tests (3): `test_fused_matmul_pointwise_splitk`,
+      `test_fused_matmul_pointwise_splitk_boundary_pw_input`,
+      `test_mixed_k_two_matmuls`
   - E2E script (`solution/scripts/test-e2e.sh`):
     - Track A build + 5 benchmark validation
     - Track B import verification + 5 benchmark validation (baseline mode)

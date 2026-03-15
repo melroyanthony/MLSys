@@ -73,7 +73,7 @@
 | test_edge_cyclic_dag_rejected | Cyclic input returns Err("cycle") |
 | test_benchmark_solutions_validity | All 5 benchmarks: full op coverage, valid JSON |
 | test_fused_matmul_pointwise_splitk | Fused MatMul+Pointwise with split-K granularity |
-| test_boundary_pw_input | Boundary Pointwise input tensor memory accounting |
+| test_fused_matmul_pointwise_splitk_boundary_pw_input | Boundary Pointwise input tensor memory accounting |
 | test_mixed_k_two_matmuls | Two MatMuls with different K_full in same subgraph |
 
 ### E2E Tests
