@@ -118,9 +118,14 @@ def parse_solution(data: dict, num_subgraphs: int) -> Solution:
 
     for i in range(len(sg_ops)):
         g = granularities[i]
+        w, h, k = int(g[0]), int(g[1]), int(g[2])
+        if w <= 0 or h <= 0 or k <= 0:
+            raise ValidationError(
+                f"granularities[{i}] values must be positive, got [{w}, {h}, {k}]"
+            )
         subgraphs.append(SubgraphDef(
             ops=list(sg_ops[i]),
-            granularity=Granularity(int(g[0]), int(g[1]), int(g[2])),
+            granularity=Granularity(w, h, k),
             tensors_to_retain=list(retain_lists[i]),
             traversal_order=trav_orders[i],
             subgraph_latency=float(latencies[i]),
