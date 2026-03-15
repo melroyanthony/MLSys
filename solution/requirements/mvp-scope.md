@@ -54,7 +54,7 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 | 9 | **F-05: Op grouping / chain fusion** | Greedy bottom-up fusion: group adjacent ops in topological order if merged working set fits in fast memory; verify latency improves vs. baseline on all 5 benchmarks | 6 | F-14, F-03, F-02 |
 | 10 | **F-07: Tensor retention** | After each subgraph, determine which output tensors are consumed by the immediately following subgraph and have sufficient residual capacity; retain them; verify improvement on Example 3C pattern | 4 | F-05, F-03 |
 | 11 | **F-08: Split-K** | For MatMul subgraphs where full-k working set exceeds capacity, search for the largest `k` divisor that fits; model accumulator as resident across k-steps; verify Example 5B latency | 5 | F-05, F-03, F-02 |
-| 12 | **F-06: Granularity search** | For each subgraph, try candidate `[w, h]` values (powers of 2 up to tensor dimensions); select the granularity that minimizes subgraph latency while satisfying OOM constraint; verify Example 1C pattern | 8 | F-05, F-03, F-02 |
+| 12 | **F-06: Granularity search** | For each subgraph, try candidate `[w, h]` values (powers of 2 up to tensor dimensions); **for MatMul subgraphs, also search `k` from `K_full` down to 1 in powers of 2 (Issue #15 fix) — k must not be hardcoded to 1**; select the `[w, h, k]` combination that minimises subgraph latency within the OOM constraint; larger k values reduce the total number of k-steps and total memory reloads; verify Example 1C pattern and that k > 1 is chosen for MatMul ops where the memory budget allows | 8 | F-05, F-03, F-02 |
 
 **Total MVP Estimated Effort: 43 hours**
 
@@ -71,6 +71,9 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 - [ ] The `subgraph_latencies` values in every output JSON match the latency model to within
   floating-point tolerance (validated by `Evaluate()` or the Python re-implementation)
 - [ ] No solution contains a working set exceeding `fast_memory_capacity` for any benchmark
+- [ ] For MatMul subgraphs, `k` is searched from `K_full` down to 1 (powers of 2) and the
+  `(w, h, k)` triple that minimizes total subgraph latency within `fast_memory_capacity` is
+  selected (larger `k` is preferred as a tie-breaker when latencies are equal)
 
 ---
 
@@ -83,7 +86,8 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 4. Greedy chain fusion applied          → Adjacent ops merged where memory allows
 5. Tensor retention decided             → Downstream-needed tensors flagged as resident
 6. Split-K applied to MatMul subgraphs  → k reduced to fit tight memory budgets
-7. Granularity search per subgraph      → Best [w, h, k] selected per latency model
+7. Granularity search per subgraph      → Best [w, h, k] selected per latency model;
+                                           k searched from K_full downward for MatMul ops
 8. Latency calculated for each subgraph → subgraph_latencies list populated
 9. Solution JSON written                → Ready for Evaluate() call
 10. Benchmark runner reports total      → Score vs. baseline shown; validated correct
@@ -127,3 +131,4 @@ Goal: Lowest total latency on MLSys-2026 benchmarks
 | Benchmark 17 (160 tensors, 95+ ops, 500K fast memory) has complex topology that greedy fusion mishandles | M | M | Analyze graph structure in architecture stage; design fusion rules for the attention-like repeating pattern observed in benchmarks 9, 13, 17 |
 | Working-set formula for subgraphs containing both MatMul and Pointwise ops is incorrectly specified | L | H | Cross-check against Example 5B which has exactly this combination; add a dedicated test case |
 | Python runtime too slow for benchmark 17 | L | M | Profile early; use NumPy-free pure Python for the scheduler logic (only arithmetic, no array ops needed) |
+| Granularity search defaults to k=1 for MatMul ops (Issue #15) | H | H | Search k from K_full downward; select the (w,h,k) minimizing total latency (larger k as tie-breaker); add regression test asserting k > 1 on any benchmark where K_full > 1 and memory allows |

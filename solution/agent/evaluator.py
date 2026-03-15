@@ -118,9 +118,14 @@ def parse_solution(data: dict, num_subgraphs: int) -> Solution:
 
     for i in range(len(sg_ops)):
         g = granularities[i]
+        w, h, k = int(g[0]), int(g[1]), int(g[2])
+        if w <= 0 or h <= 0 or k <= 0:
+            raise ValidationError(
+                f"granularities[{i}] values must be positive, got [{w}, {h}, {k}]"
+            )
         subgraphs.append(SubgraphDef(
             ops=list(sg_ops[i]),
-            granularity=Granularity(int(g[0]), int(g[1]), int(g[2])),
+            granularity=Granularity(w, h, k),
             tensors_to_retain=list(retain_lists[i]),
             traversal_order=trav_orders[i],
             subgraph_latency=float(latencies[i]),
@@ -315,11 +320,12 @@ def compute_working_set(
     boundary_inputs = consumed_inside - produced_inside
     boundary_outputs = produced_inside - consumed_inside
 
-    # Determine whether this is a split-K scenario
+    # Determine whether this is a split-K scenario.
+    # Use min(K_full) across all MatMuls, consistent with compute_subgraph_latency().
     matmul_ops = [op_idx for op_idx in subgraph_ops
                   if problem.ops[op_idx].op_type == "MatMul"]
     if matmul_ops:
-        k_full = _k_full_for_op(problem.ops[matmul_ops[0]], problem)
+        k_full = min(_k_full_for_op(problem.ops[op_idx], problem) for op_idx in matmul_ops)
         num_k_steps = math.ceil(k_full / k)
     else:
         k_full = 1
@@ -400,7 +406,7 @@ def compute_subgraph_latency(
     - In split-K mode:
       - LHS tensors: loaded FULLY in first k-step, held resident
       - RHS tensors: streamed as k-strips per k-step
-      - Output accumulator: held resident, evicted only in last k-step of last spatial tile
+      - Output accumulator: held resident, evicted on last k-step of each spatial tile
     - In non-split-K mode (or pointwise):
       - LHS treated as row-strips for intra-subgraph reuse tracking
       - RHS treated as col-strips for intra-subgraph reuse tracking
@@ -422,24 +428,17 @@ def compute_subgraph_latency(
     num_tiles_h = math.ceil(H_out / h)
     num_spatial_tiles = num_tiles_w * num_tiles_h
 
-    # K-steps: derive from the boundary-output MatMul (the one whose reduction
-    # dimension determines the tiling loop). Fall back to first MatMul if none
-    # is a boundary output, or 1 for pure-Pointwise subgraphs.
+    # K-steps: derive from the minimum K_full across ALL MatMuls in the subgraph.
+    # Internal MatMuls (whose output is ephemeral) still need k-steps.
+    # If there is no MatMul at all, k is irrelevant: 1 k-step.
     matmul_ops = [op_idx for op_idx in subgraph_ops
                   if problem.ops[op_idx].op_type == "MatMul"]
     if matmul_ops:
-        # Prefer boundary-output MatMul
-        boundary_matmul = None
-        for op_idx in matmul_ops:
-            out_t = problem.ops[op_idx].outputs[0]
-            if out_t in boundary_outputs:
-                boundary_matmul = op_idx
-                break
-        ref_op = boundary_matmul if boundary_matmul is not None else matmul_ops[0]
-        k_full = _k_full_for_op(problem.ops[ref_op], problem)
-        num_k_steps = math.ceil(k_full / k)
+        min_k_full = min(
+            _k_full_for_op(problem.ops[op_idx], problem) for op_idx in matmul_ops
+        )
+        num_k_steps = math.ceil(min_k_full / k)
     else:
-        k_full = 1
         num_k_steps = 1
 
     is_split_k = num_k_steps > 1
@@ -447,15 +446,16 @@ def compute_subgraph_latency(
     # Build traversal sequence
     tile_sequence = traversal_order if traversal_order is not None else list(range(num_spatial_tiles))
 
-    # Compute time per step (constant)
-    compute_per_step = 0.0
+    # Split compute: MatMul cost paid every k-step; Pointwise cost only on last k-step.
+    matmul_compute_per_step = 0.0
+    pointwise_compute = 0.0
     for op_idx in subgraph_ops:
         op = problem.ops[op_idx]
         if op.op_type == "MatMul":
             k_full_op = _k_full_for_op(op, problem)
-            compute_per_step += op.base_cost * (k / k_full_op)
+            matmul_compute_per_step += op.base_cost * (k / k_full_op)
         else:
-            compute_per_step += op.base_cost
+            pointwise_compute += op.base_cost
 
     # Categorize boundary inputs
     lhs_inputs, rhs_streamed_inputs, pw_inputs = _categorize_inputs(
@@ -474,7 +474,6 @@ def compute_subgraph_latency(
     for spatial_step, tile_flat_idx in enumerate(tile_sequence):
         tile_row = tile_flat_idx // num_tiles_w
         tile_col = tile_flat_idx % num_tiles_w
-        is_last_spatial = (spatial_step == len(tile_sequence) - 1)
 
         for k_step in range(num_k_steps):
             is_first_k = (k_step == 0)
@@ -527,21 +526,19 @@ def compute_subgraph_latency(
             # ------- Output eviction -------
             # Non-retained outputs are evicted to slow memory.
             # Retained outputs (tensors_to_retain_after) are NOT evicted.
-            # In split-K: eviction only at LAST k-step of LAST spatial tile.
+            # In split-K with spatial tiling: eviction at LAST k-step of EACH spatial tile
+            # (each spatial tile's accumulator is written out once it finishes all k-steps).
             # In non-split-K: eviction at LAST k-step of EACH spatial tile.
             if is_last_k:
-                if is_split_k:
-                    if is_last_spatial:
-                        for t_idx in boundary_outputs:
-                            if t_idx not in tensors_to_retain_after:
-                                mem_out += (w * h) / bw
-                else:
-                    for t_idx in boundary_outputs:
-                        if t_idx not in tensors_to_retain_after:
-                            mem_out += (w * h) / bw
+                for t_idx in boundary_outputs:
+                    if t_idx not in tensors_to_retain_after:
+                        mem_out += (w * h) / bw
+
+            # Pointwise ops execute only on the last k-step of each spatial tile.
+            compute_this_step = matmul_compute_per_step + (pointwise_compute if is_last_k else 0.0)
 
             memory_time = mem_in + mem_out
-            step_latency = max(compute_per_step, memory_time)
+            step_latency = max(compute_this_step, memory_time)
             total_latency += step_latency
 
     return total_latency
@@ -573,6 +570,22 @@ def evaluate(problem: Problem, solution: Solution) -> float:
     for sg_idx, sg in enumerate(solution.subgraphs):
         ops_in_sg = sg.ops
         gran = sg.granularity
+
+        # Validate MatMul K_full consistency and k <= K_full
+        matmul_k_fulls = [
+            _k_full_for_op(problem.ops[op_idx], problem)
+            for op_idx in ops_in_sg
+            if problem.ops[op_idx].op_type == "MatMul"
+        ]
+        if matmul_k_fulls:
+            if len(set(matmul_k_fulls)) > 1:
+                raise ValidationError(
+                    f"Subgraph {sg_idx}: MatMul ops have inconsistent K_full values: {matmul_k_fulls}"
+                )
+            if gran.k > matmul_k_fulls[0]:
+                raise ValidationError(
+                    f"Subgraph {sg_idx}: granularity k={gran.k} exceeds K_full={matmul_k_fulls[0]}"
+                )
 
         if not check_oom(ops_in_sg, gran, problem, retained_tensors):
             ws = compute_working_set(ops_in_sg, gran, problem, retained_tensors)

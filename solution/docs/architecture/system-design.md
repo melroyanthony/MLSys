@@ -153,7 +153,8 @@ Input JSON
     |                    find largest k divisor that fits
     v
 [7. Granularity Search] --> for each subgraph, search candidate
-    |                        (w, h) values to minimize latency
+    |                        (w, h, k) triples to minimize total
+    |                        subgraph latency (see below)
     v
 [8. Latency Calculation] --> compute final subgraph_latencies
     |
@@ -162,6 +163,39 @@ Input JSON
 ```
 
 Each stage takes the current schedule and refines it. Stages 4-7 are the optimization core. The baseline (stage 3) guarantees a valid output even if all optimizers are disabled.
+
+### Stage 7: Granularity Search -- Full (w, h, k) Search
+
+The granularity search explores a three-dimensional candidate space for each subgraph:
+
+**Search space:**
+```
+w candidates: powers of 2 from 1 up to output_width
+h candidates: powers of 2 from 1 up to output_height
+k candidates: K_cap, K_cap/2, K_cap/4, ..., 1  (powers of 2, descending)
+```
+
+Where `K_cap = K_full` (the shared reduction dimension across all MatMuls in the subgraph). **Invariant: all MatMul ops within a single subgraph must share the same K_full.** This invariant is enforced during fusion (ops with different K_full are not merged) and validated during evaluation. It ensures the subgraph has a single, well-defined k-step loop. For Pointwise-only subgraphs, k is fixed at 1 and only (w, h) is searched.
+
+**For each (w, h, k) candidate:**
+1. Compute the working set (input slices + output slices + retained tensors)
+2. If `working_set > fast_memory_capacity`, skip this candidate (OOM)
+3. Compute total subgraph latency = sum of per-step roofline costs across all `num_spatial_tiles * num_k_steps` steps
+4. Track the candidate with the lowest total latency
+
+**Why k must be searched (not fixed at 1):**
+
+With k=1, each k-step loads minimal input strips (h*1 + 1*w elements for MatMul), but requires K_full such steps per spatial tile. The total memory traffic is K_full * (h + w) per tile. With k=K_full, there is only 1 k-step per tile, loading h*K_full + K_full*w elements, but only once. The optimal k depends on the roofline balance: larger k increases per-step memory but reduces total steps and total memory traffic.
+
+The previous implementation always selected k=1 because it minimized the per-step working set. However, the correct objective is to minimize **total** subgraph latency (summed across all steps), which accounts for the multiplicative effect of k-step count on repeated data reloading.
+
+**Search complexity:** For a subgraph with output dimensions W x H and reduction K_full:
+- w candidates: O(log W)
+- h candidates: O(log H)
+- k candidates: O(log K_full)
+- Total: O(log W * log H * log K_full) candidates per subgraph
+- Each candidate evaluation is O(1)
+- Total search time remains well under 1 second for all benchmarks
 
 ---
 
@@ -190,10 +224,6 @@ For each execution step (one spatial tile, one k-step):
 
 #### Compute Time
 
-```
-compute_time_per_step = sum(op.base_cost for op in subgraph.ops)
-```
-
 **Hardware padding rule**: If `w < native_w` or `h < native_h`, the compute cost per step is unchanged (the hardware pads to native size, so you pay full cost but produce a smaller output tile). The cost is already accounted for by the increased number of spatial tiles. Specifically:
 
 - The `base_cost` is the cost for **one execution at native granularity**
@@ -202,19 +232,18 @@ compute_time_per_step = sum(op.base_cost for op in subgraph.ops)
 
 **Reduction scaling**: For MatMul, each k-step costs `base_cost * (k / K_full)` where `K_full` is the op's full reduction dimension. Verified against Example 5B: `k=32`, `K_full=128`, `base_cost=2000` per op, compute per step = `2000*(32/128) + 2000*(32/128) = 1000`.
 
-For Pointwise, k is irrelevant — full `base_cost` per step. Verified against Example 1C: `base_cost=1000+100=1100` per step, 4 tiles.
+For Pointwise, k is irrelevant — the op executes **once per spatial tile** (on the last k-step only). In a fused subgraph with k-steps from a MatMul, Pointwise compute is added only on the final k-step of each spatial tile, not every step. Verified against Example 1C (pure Pointwise, no k-steps): `base_cost=1000+100=1100` per tile, 4 tiles.
 
 **Spatial padding**: if `w < native_w` or `h < native_h`, you still pay full `base_cost` per step (hardware pads), but need more spatial tiles to cover the tensor.
 
 **Summary**:
 ```
-For each op in subgraph:
-    if op.op_type == "MatMul":
-        compute_cost = op.base_cost * (k / K_full_for_this_op)
-    else:  # Pointwise
-        compute_cost = op.base_cost
-
-compute_time_per_step = sum(compute_cost for each op)
+For each k-step of a spatial tile:
+  matmul_compute = sum(op.base_cost * (k / K_full) for MatMul ops)
+  if is_last_k_step:
+      compute = matmul_compute + sum(op.base_cost for Pointwise ops)
+  else:
+      compute = matmul_compute
 ```
 
 Where `K_full_for_this_op` is the inner/reduction dimension of that specific MatMul (the width of the LHS input = height of the RHS input... actually: for MatMul with inputs [LHS, RHS], `K_full = LHS.width = RHS.height`).
@@ -233,7 +262,7 @@ For each execution step, we must account for data loaded from slow memory and da
 **Inputs loaded from slow memory**:
 - For each **boundary input** tensor of the subgraph (not ephemeral):
   - Compute the slice size based on the op type and granularity
-  - If the tensor is already resident in fast memory (retained from previous subgraph, or already loaded in a previous step of the same subgraph via intra-subgraph reuse), it costs 0
+  - If the tensor is already resident in fast memory (retained from previous subgraph, or already loaded in a previous step of the same subgraph via intra-subgraph reuse) it costs 0
   - Otherwise: `slice_size / slow_memory_bandwidth`
 
 **Slice sizes** (for one spatial tile + one k-step):
@@ -420,7 +449,7 @@ total_latency = sum(subgraph_latency for each subgraph)
 ## Performance Considerations
 
 1. **Rust zero-cost abstractions**: The scheduler performs integer arithmetic, comparisons, and vector operations. Rust compiles to native code with no garbage collection pauses.
-2. **Granularity search space**: Limit candidates to powers of 2 that divide tensor dimensions. For a 4096-wide tensor: {128, 256, 512, 1024, 2048, 4096} -- at most 6 candidates per dimension.
+2. **Granularity search space**: Candidates are powers of 2 for each dimension. For spatial dimensions, up to ~6 candidates per dimension for a 4096-wide tensor. For the k dimension, O(log2 K_full) candidates (e.g., 12 for K_full=4096). The full search space per subgraph is O(log W * log H * log K) candidates, each evaluated in O(1) time. See ADR-004 for details on the k-dimension search.
 3. **Fusion feasibility check**: Before merging two subgraphs, check working-set OOM at the most restrictive granularity. This is O(1) per candidate merge.
 4. **Topological sort**: Kahn's algorithm, O(V + E), runs once.
 5. **Total optimizer complexity**: O(N^2) for fusion (N = number of ops), O(G) for granularity search per subgraph (G = candidate granularities). Well within the contest time budget even for benchmark 17.

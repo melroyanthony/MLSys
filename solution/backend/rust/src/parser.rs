@@ -115,11 +115,13 @@ pub fn parse_solution(json_str: &str) -> Result<Solution, String> {
         if g.len() != 3 {
             return Err(format!("granularities[{i}] must have exactly 3 elements, got {}", g.len()));
         }
-        let granularity = Granularity {
-            w: g[0].as_i64().ok_or(format!("granularities[{i}][0] is not an integer"))?,
-            h: g[1].as_i64().ok_or(format!("granularities[{i}][1] is not an integer"))?,
-            k: g[2].as_i64().ok_or(format!("granularities[{i}][2] is not an integer"))?,
-        };
+        let w = g[0].as_i64().ok_or(format!("granularities[{i}][0] is not an integer"))?;
+        let h = g[1].as_i64().ok_or(format!("granularities[{i}][1] is not an integer"))?;
+        let k = g[2].as_i64().ok_or(format!("granularities[{i}][2] is not an integer"))?;
+        if w <= 0 || h <= 0 || k <= 0 {
+            return Err(format!("granularities[{i}] values must be positive, got [{w}, {h}, {k}]"));
+        }
+        let granularity = Granularity { w, h, k };
 
         let retain_items = retain_arr.get(i)
             .and_then(|v| v.as_array())

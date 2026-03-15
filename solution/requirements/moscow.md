@@ -62,6 +62,12 @@
     the right sub-native granularity can switch bottleneck from memory-bound to compute-bound
     and enable fusing ops that would otherwise OOM.
   - **What works without it**: Valid submission using only native granularity.
+  - **k search requirement (Issue #15)**: The granularity search must include the `k`
+    dimension for MatMul subgraphs. The search sweeps `k` from `K_full` down to 1 in powers
+    of 2 and selects the `(w, h, k)` that minimizes total subgraph latency within the OOM
+    constraint. Larger `k` is preferred as a tie-breaker when latencies are equal, because
+    `k = 1` is pathologically bad — it produces `K_full` micro-steps each loading tiny strips,
+    increasing memory traffic by a factor of `K_full` relative to a single full-K step.
 
 - [ ] **F-12: Benchmark runner (reads problem + solution, calls Evaluate)**
   - **Why not Must**: Could manually verify each output. But without a runner, iteration speed
