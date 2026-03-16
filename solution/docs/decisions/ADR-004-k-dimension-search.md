@@ -19,7 +19,7 @@ Benchmark analysis showed:
 The root cause was that the search evaluated candidates but k=1 minimizes the per-step working set (smallest slices). The search was not properly accounting for the multiplicative k-step count and the repeated strip reloading that comes with smaller k values.
 
 ## Decision
-Search k from max(K_full across all MatMuls in the subgraph) down to 1 in powers of 2, jointly with (w, h) spatial candidates. The full search space becomes:
+Search k from max(K_full across all MatMuls in the subgraph) down to 1 by repeated integer halving, jointly with (w, h) spatial candidates. The full search space becomes:
 
 ```
 candidates = w_values x h_values x k_values
