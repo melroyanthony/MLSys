@@ -122,7 +122,7 @@ fn optimize_*(subgraphs: &mut Vec<SubgraphDef>, problem: &Problem, dag: &DagInfo
 | 1 | 9 | 5 | 512x512 (262,144) | 60,000 | 20 |
 | 5 | 29 | 19 | 1024x1024 (1,048,576) | 30,000 | 15 |
 | 9 | 49 | 32 | 4096x4096 (16,777,216) | 250,000 | 25 |
-| 13 | 96 | 63 | 4096x4096 (16,777,216) | 600,000 | 50 |
+| 13 | 100 | 63 | 4096x4096 (16,777,216) | 600,000 | 50 |
 | 17 | 160 | 103 | 2048x2048 (4,194,304) | 500,000 | 100 |
 
 Note: Tensor sizes can be much larger than fast memory capacity, requiring tiling (spatial granularity < tensor dimensions).

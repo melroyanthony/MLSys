@@ -73,7 +73,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Traversal optimization: snake/zig-zag tile order for MatMul data reuse.
 
 - **Test suite**
-  - 15 Rust unit tests in `src/main.rs`:
+  - 18 Rust unit tests in `src/main.rs`:
     - Example 1 (baseline pointwise chain): strategies A, B, C
     - Example 2 (larger tensors, 256x256): strategies A and B
     - Example 3 (diamond graph): spilling baseline and selective retention
@@ -82,6 +82,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     - Edge cases: single tiny op, OOM detection, serialization round-trip,
       ephemeral tensor boundary correctness, cyclic DAG rejection
     - All 5 released benchmarks: full pipeline validity check
+    - New tests (3): `test_fused_matmul_pointwise_splitk`,
+      `test_fused_matmul_pointwise_splitk_boundary_pw_input`,
+      `test_mixed_k_two_matmuls`
   - E2E script (`solution/scripts/test-e2e.sh`):
     - Track A build + 5 benchmark validation
     - Track B import verification + 5 benchmark validation (baseline mode)
@@ -105,14 +108,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     topology (Rust binary + Python agent), user journeys, C4 workspace,
     error catalog (Rust error handling), security model.
   - `solution/docs/decisions/` — ADR-001 (Rust + Python language selection),
-    ADR-002 (baseline-first development), ADR-003 (greedy fusion over DP).
+    ADR-002 (baseline-first development), ADR-003 (greedy fusion over DP),
+    ADR-004 (k-dimension search in granularity optimization),
+    ADR-005 (closed-form latency evaluation),
+    ADR-006 (mixed-K fusion).
 
 - **Benchmark results** (Track A — Rust)
 
-  | Benchmark | Ops | Latency |
-  |-----------|-----|---------|
-  | mlsys-2026-1  | 5   | 27,443    |
-  | mlsys-2026-5  | 19  | 27,856    |
-  | mlsys-2026-9  | 32  | 110,100   |
-  | mlsys-2026-13 | 63  | 191,693   |
-  | mlsys-2026-17 | 103 | 23,650    |
+  | Benchmark | Ops | Latency | Subgraphs |
+  |-----------|-----|---------|-----------|
+  | mlsys-2026-1  | 5   | 262,822    | 4  |
+  | mlsys-2026-5  | 19  | 909,261    | 13 |
+  | mlsys-2026-9  | 32  | 12,415,140 | 24 |
+  | mlsys-2026-13 | 63  | 4,707,779  | 25 |
+  | mlsys-2026-17 | 103 | 814,572    | 81 |

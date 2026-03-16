@@ -84,7 +84,7 @@ Solution: 3 subgraphs, total latency = 8234.56
 Solution written to /tmp/out.json
 ```
 
-To run the full unit test suite (15 tests, including all 5 released benchmarks):
+To run the full unit test suite (18 tests, including all 5 released benchmarks):
 
 ```bash
 cargo test
@@ -232,7 +232,7 @@ solution/
 │   └── rust/
 │       ├── Cargo.toml
 │       └── src/
-│           ├── main.rs              # Entry point + 15 unit tests
+│           ├── main.rs              # Entry point + 18 unit tests
 │           ├── models.rs
 │           ├── parser.rs
 │           ├── dag.rs
@@ -274,7 +274,7 @@ solution/
 
 ## Testing
 
-### Track A — Rust Unit Tests (15 tests)
+### Track A — Rust Unit Tests (18 tests)
 
 ```bash
 cd solution/backend/rust
@@ -336,18 +336,18 @@ Validation checks per output file:
 All 5 released benchmarks produce valid solutions within the memory constraint.
 Reported latencies are from Track A (Rust) on the local machine.
 
-| Benchmark | Ops | Tensors | Fast Mem | Bandwidth | Track A Latency |
-|-----------|-----|---------|----------|-----------|-----------------|
-| mlsys-2026-1  | 5   | 9   | 60,000   | 20  | 27,443    |
-| mlsys-2026-5  | 19  | 29  | 30,000   | 15  | 27,856    |
-| mlsys-2026-9  | 32  | 49  | 250,000  | 25  | 110,100   |
-| mlsys-2026-13 | 63  | 100 | 600,000  | 50  | 191,693   |
-| mlsys-2026-17 | 103 | 160 | 500,000  | 100 | 23,650    |
+| Benchmark | Ops | Tensors | Fast Mem | Bandwidth | Track A Latency | Subgraphs |
+|-----------|-----|---------|----------|-----------|-----------------|-----------|
+| mlsys-2026-1  | 5   | 9   | 60,000   | 20  | 262,822    | 4  |
+| mlsys-2026-5  | 19  | 29  | 30,000   | 15  | 909,261    | 13 |
+| mlsys-2026-9  | 32  | 49  | 250,000  | 25  | 12,415,140 | 24 |
+| mlsys-2026-13 | 63  | 100 | 600,000  | 50  | 4,707,779  | 25 |
+| mlsys-2026-17 | 103 | 160 | 500,000  | 100 | 814,572    | 81 |
 
-All benchmarks complete in under 1 second. The optimizer fuses adjacent
-chains, applies Split-K for memory-constrained MatMuls, searches tile
-granularities to balance compute/memory costs, and uses snake traversal
-for MatMul data reuse.
+The optimizer runs in under 1 second per benchmark on a standard dev machine. It uses cost-based
+fusion with epsilon tolerance to merge adjacent chains, applies Split-K for
+memory-constrained MatMuls, searches tile granularities to balance
+compute/memory costs, and uses snake traversal for MatMul data reuse.
 
 ---
 

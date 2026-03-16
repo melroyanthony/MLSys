@@ -6,7 +6,7 @@ This is a **computational optimization tool**, not a web service. It is a single
 
 ## Scale Estimates
 
-- Input size: 2 ops / 3 tensors (trivial) to 96 ops / 160 tensors (benchmark 17)
+- Input size: 2 ops / 3 tensors (trivial) to 103 ops / 160 tensors (benchmark 17)
 - Runtime target: < 2 seconds per benchmark on a standard developer machine
 - No concurrency, no network, no database
 - Memory: All data fits easily in RAM (< 1 MB input, < 10 MB working state)
@@ -470,28 +470,17 @@ working_set = sum(slice_size for each boundary input and output tensor that must
 
 ### Retained Tensors from Previous Subgraphs
 
-When a previous subgraph retains a tensor, that tensor occupies fast memory at its **full size** (not a slice), because it was computed across all spatial tiles and remains fully materialized.
+When a previous subgraph retains a tensor, that tensor occupies fast memory at its **full size** (not a slice), because it was fully materialized by the prior subgraph and remains resident across subgraph boundaries.
 
-Wait -- actually, retained tensors are computed slice-by-slice but the full tensor accumulates. Let me reconsider.
-
-Actually, from Example 3C: Tensor1 (128x128 = 16384) is retained. The working set of subgraph 1 must include this full tensor. The subgraph 1 has Tensor1 as input (already resident), processes Op1 and Op2 producing Tensor3. Working set = Tensor1 (16384, resident) + Tensor2 (ephemeral, 0) + Tensor3 output (16384) = 32768 <= 50000. This works.
-
-But wait -- if the subgraph uses a granularity smaller than the tensor, only a slice of the retained tensor is needed per step. The retained tensor is at full size in fast memory though (it was fully computed by the prior subgraph at its granularity).
-
-Actually, the problem says retained tensors stay in fast memory at full size. The working set calculation must include:
-- The **full size** of all currently retained tensors
+The working set calculation must include:
+- The **full size** of all currently retained tensors from previous subgraphs
 - Plus the **slice sizes** of all boundary inputs/outputs needed for the current execution step
 
-Correction: from Example 5B, the accumulator Tensor4 (128x128 = 16384) and Tensor0 (128x128 = 16384) are resident, plus Tensor1 strip (128x32 = 4096) and Tensor2 strip (32x128 = 4096). Working set = 16384 + 16384 + 4096 + 4096 = 40960. That matches.
+From Example 3C: Tensor1 (128x128 = 16384) is retained. The working set of subgraph 1 includes Tensor1 at full size (16384, already resident), Tensor2 as ephemeral (0), and Tensor3 output slice (16384). Working set = 32768 <= 50000. This confirms that retained tensors count at full size.
 
-But Tensor0 is a full input that gets loaded in step 1 and reused. It's NOT a retained tensor from a previous subgraph -- it's loaded in this subgraph. Tensor4 is the accumulator (output). So the working set includes:
-- Full-size inputs that are resident (loaded once, reused): full tensor size
-- Streamed input strips: slice size
-- Output/accumulator: slice size (w * h)
+From Example 5B: the accumulator Tensor4 (128x128 = 16384) and Tensor0 (128x128 = 16384) are resident, plus Tensor1 strip (128x32 = 4096) and Tensor2 strip (32x128 = 4096). Working set = 16384 + 16384 + 4096 + 4096 = 40960. Note that Tensor0 here is a full input loaded and reused within this subgraph (not a cross-subgraph retained tensor), and Tensor4 is the accumulator output.
 
-This is more nuanced. The working set depends on which step we're computing and the traversal order. The **maximum** working set across all steps must fit.
-
-For the OOM check, we need the **worst-case step** (typically the first step, where the most data is loaded fresh).
+For the OOM check, the **worst-case step** (typically the first step, where the most data is loaded fresh) must fit within fast memory capacity.
 
 ---
 
@@ -583,8 +572,8 @@ total_latency = sum(subgraph_latency for each subgraph)
 | 1 | 5 | 9 | 512x512 | 60,000 | 20 | Linear chain (MatMul + Pointwise) |
 | 5 | 19 | 29 | 128-1024 mixed | 30,000 | 15 | 3x attention heads + aggregation |
 | 9 | 32 | 49 | 1024-4096 mixed | 250,000 | 25 | 8x repeating MatMul+PW blocks |
-| 13 | 63 | 96 | 128-4096 mixed | 600,000 | 50 | 16x parallel MatMul heads + PW aggregation |
-| 17 | 96 | 160 | 128-2048 mixed | 500,000 | 100 | 8x attention + 8x MLP blocks + residual |
+| 13 | 63 | 100 | 128-4096 mixed | 600,000 | 50 | 16x parallel MatMul heads + PW aggregation |
+| 17 | 103 | 160 | 128-2048 mixed | 500,000 | 100 | 8x attention + 8x MLP blocks + residual |
 
 ---
 

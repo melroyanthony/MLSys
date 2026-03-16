@@ -57,7 +57,7 @@ workspace "MLSys DAG Scheduler" "Computational graph scheduler for memory-constr
                     description "Finds optimal k for MatMul subgraphs under memory pressure"
                 }
                 granularityComponent = component "Granularity Search" "Spatial tiling" {
-                    description "Searches (w, h) candidates to minimize per-subgraph latency"
+                    description "Searches (w, h, k) candidates to minimize per-subgraph latency"
                 }
                 traversalComponent = component "Traversal Order" "Tile ordering" {
                     description "Snake/zig-zag traversal to reduce input strip reloads"
