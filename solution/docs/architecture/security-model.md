@@ -9,9 +9,12 @@ Track B (Python agent) makes HTTPS calls to the Gemini API
 variable is set. No problem data or solution JSON is logged or persisted by the
 API client beyond the scope of a single agent run. When `GOOGLE_API_KEY` is set
 to `dummy` or omitted, the agent runs in local-only mode with zero network
-traffic. Note: on API error paths, the agent may print a preview of the
-Gemini response (first 500 chars) to stderr for debugging, which could include
-partial solution JSON. This is not routine logging.
+traffic. When `GOOGLE_API_KEY` is valid, Track B transmits the full problem
+JSON and current solution JSON to the Gemini API as part of the prompt. No
+claims are made about Gemini's data retention policies — this is controlled
+by the contest organizers' environment. On API error paths, the agent may
+print a preview of the Gemini response (first 500 chars) to stderr for
+debugging.
 
 ## Threat Model
 

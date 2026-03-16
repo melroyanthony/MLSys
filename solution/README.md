@@ -344,7 +344,7 @@ Reported latencies are from Track A (Rust) on the local machine.
 | mlsys-2026-13 | 63  | 100 | 600,000  | 50  | 4,707,779  | 25 |
 | mlsys-2026-17 | 103 | 160 | 500,000  | 100 | 814,572    | 81 |
 
-All benchmarks complete in under 1 second. The optimizer uses cost-based
+The optimizer runs in under 1 second per benchmark on a standard dev machine. It uses cost-based
 fusion with epsilon tolerance to merge adjacent chains, applies Split-K for
 memory-constrained MatMuls, searches tile granularities to balance
 compute/memory costs, and uses snake traversal for MatMul data reuse.
